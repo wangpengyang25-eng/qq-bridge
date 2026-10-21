@@ -660,6 +660,59 @@ $('#themeBtn').addEventListener('click', () => {
 
 syncThemeBtn();
 
+// 能力开关：工具与上下文。折叠在一块里，免得把主界面撑乱。
+const CAP_LABELS = {
+  search: '联网搜索',
+  calc: '计算器',
+  datetime: '日期计算',
+  random: '随机骰子',
+  fetchUrl: '读网页',
+  vision: '看图',
+  stickers: '表情包',
+  ambient: '群聊背景',
+  smartInject: '背景按需注入',
+  adaptive: '难度自适应',
+};
+
+function renderCaps() {
+  const g = state.effective?.groups?.features;
+  const box = $('#caps');
+  if (!box) return;
+  if (!g) {
+    box.innerHTML = '<p class="hint" style="padding:10px">读不到设置</p>';
+    return;
+  }
+  const onCount = Object.keys(CAP_LABELS).filter((k) => g[k]?.value === true).length;
+  const sum = $('#capsSummary');
+  if (sum) sum.textContent = `工具与上下文 · ${onCount} 项开启 · 点开调整`;
+
+  box.innerHTML = Object.entries(CAP_LABELS)
+    .map(([k, label]) => {
+      const cell = g[k];
+      if (!cell) return '';
+      const on = cell.value === true;
+      const changed = cell.overridden ? ' changed' : '';
+      return `<button class="cap${on ? ' on' : ''}${changed}" data-cap="${k}"
+        title="${cell.overridden ? `已改过；默认是「${cell.base ? '开' : '关'}」` : '点击切换'}">${esc(label)}</button>`;
+    })
+    .join('');
+
+  box.querySelectorAll('button[data-cap]').forEach((el) => {
+    el.addEventListener('click', async () => {
+      const key = el.dataset.cap;
+      const next = !(g[key]?.value === true);
+      try {
+        const r = await api('/api/control', { method: 'PATCH', body: JSON.stringify({ control: { features: { [key]: next } } }) });
+        state.effective = { groups: r.groups };
+        renderCaps();
+        await loadRuntime();
+      } catch (e) {
+        alert(`切换失败：${e.message}`);
+      }
+    });
+  });
+}
+
 async function loadControl() {
   try {
     const r = await api('/api/control');
@@ -668,6 +721,7 @@ async function loadControl() {
     state.effective = null;
   }
   renderSwitches();
+  renderCaps();
 }
 
 (async function main() {

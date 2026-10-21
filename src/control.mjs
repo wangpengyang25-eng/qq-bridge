@@ -38,6 +38,19 @@ export const SCHEMA = {
     followUp: { type: 'bool' }, // 一个人在跟她聊时，不用每句都 @
     followUpWindowSec: { type: 'int', min: 0, max: 3600 },
   },
+  // 能力开关：工具与上下文。这一类不影响"说不说话"，只影响"会不会用某个工具"。
+  features: {
+    search: { type: 'bool' }, // 联网搜索
+    calc: { type: 'bool' }, // 本地计算器
+    datetime: { type: 'bool' }, // 日期计算
+    random: { type: 'bool' }, // 随机/骰子
+    fetchUrl: { type: 'bool' }, // 读网页
+    vision: { type: 'bool' }, // 看图
+    stickers: { type: 'bool' }, // 表情包（总开关）
+    ambient: { type: 'bool' }, // 群聊背景
+    smartInject: { type: 'bool' }, // 按需注入背景
+    adaptive: { type: 'bool' }, // 难度自适应
+  },
   initiative: {
     enabled: { type: 'bool' },
     dailyLimit: { type: 'int', min: 0, max: 100 },

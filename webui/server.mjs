@@ -181,6 +181,18 @@ function readRawSettings() {
         followUp: cfg.mode?.followUp?.enabled !== false,
         followUpWindowSec: Math.round((cfg.mode?.followUp?.windowMs ?? 180000) / 1000),
       },
+      features: {
+        search: cfg.search?.enabled,
+        calc: cfg.calc?.enabled,
+        datetime: cfg.tools?.datetime,
+        random: cfg.tools?.random,
+        fetchUrl: cfg.tools?.fetchUrl,
+        vision: cfg.vision?.enabled,
+        stickers: cfg.stickers?.enabled,
+        ambient: cfg.ambient?.enabled,
+        smartInject: cfg.ambient?.smartInject,
+        adaptive: cfg.llm?.adaptive,
+      },
     };
   } catch {
     return null;

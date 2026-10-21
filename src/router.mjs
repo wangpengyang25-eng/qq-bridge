@@ -358,6 +358,9 @@ export class Router {
     const allow = this.effAllowedGroups();
     const inScope = !allow.length || allow.includes(String(evt.sceneId));
 
+    // 能力开关可能被面板改过，这里的群聊背景要用最新状态
+    this.applyFeatureControl();
+
     // 连续对话：先记下"谁在说话"。别人插话会立刻打断（这是防误答的关键）
     let following = false;
     if (inScope) {
@@ -797,6 +800,35 @@ export class Router {
 
   // ---------- 面板设置（运行时可改，合并到配置之上）----------
 
+  /** 能力开关：工具与上下文。注意有些状态被对象在构造时就抓走了，要一并改。 */
+  applyFeatureControl() {
+    const f = this.readControl().values.features || {};
+    const set = (obj, key, v) => {
+      if (typeof v === 'boolean' && obj && key in obj) obj[key] = v;
+    };
+    set(this.cfg.search, 'enabled', f.search);
+    set(this.cfg.calc, 'enabled', f.calc);
+    set(this.cfg.tools, 'datetime', f.datetime);
+    set(this.cfg.tools, 'random', f.random);
+    set(this.cfg.tools, 'fetchUrl', f.fetchUrl);
+    set(this.cfg.vision, 'enabled', f.vision);
+    set(this.cfg.llm, 'adaptive', f.adaptive);
+
+    // 这两个被各自的类实例持有，改 cfg 不够
+    if (typeof f.ambient === 'boolean') {
+      this.cfg.ambient.enabled = f.ambient;
+      if (this.ambient) this.ambient.enabled = f.ambient;
+    }
+    if (typeof f.smartInject === 'boolean') {
+      this.cfg.ambient.smartInject = f.smartInject;
+      if (this.ambient) this.ambient.smartInject = f.smartInject;
+    }
+    if (typeof f.stickers === 'boolean') {
+      this.cfg.stickers.enabled = f.stickers;
+      if (this.stickers) this.stickers.enabled = f.stickers;
+    }
+  }
+
   /** 面板上的"连续对话"开关与窗口 */
   applyFollowControl() {
     const c = this.readControl().values.chat || {};
@@ -1128,6 +1160,11 @@ export class Router {
 
   /** 给面板看的运行快照（由 bridge 定时写进 data/runtime.json） */
   snapshot() {
+    // 先应用一次面板设置：没有消息进来时 cfg 不会自己更新，
+    // 那样面板上看到的就是"上次有消息时"的旧值。
+    this.applyFeatureControl();
+    this.applyFollowControl();
+    this.applyInitiativeControl();
     const ctl = this.readControl().values;
     const ov = this.readOverrides();
     return {
@@ -1143,6 +1180,19 @@ export class Router {
         error: this._personaError,
       },
       stickerSet: this._activeSet || this.cfg.stickers?.activeSet || '',
+      // 生效中的能力开关（面板改完看这里能确认真的生效了）
+      features: {
+        search: this.cfg.search?.enabled === true,
+        calc: this.cfg.calc?.enabled === true,
+        datetime: this.cfg.tools?.datetime !== false,
+        random: this.cfg.tools?.random !== false,
+        fetchUrl: this.cfg.tools?.fetchUrl !== false,
+        vision: this.cfg.vision?.enabled === true,
+        stickers: this.cfg.stickers?.enabled === true,
+        ambient: this.cfg.ambient?.enabled === true,
+        smartInject: this.cfg.ambient?.smartInject === true,
+        adaptive: this.cfg.llm?.adaptive !== false,
+      },
       stats: this.stats,
       initiative: this.initiative.summary(),
       lastInitiative: this.initiative.lastAction || null,
@@ -1170,6 +1220,7 @@ export class Router {
       // 每次回答前对一下人设和套装（有 mtime 缓存，没改就是几次 stat，很便宜）
       this.applyPersona();
       this.applyStickerSet();
+      this.applyFeatureControl();
       // 关系块：没显式传就按当前说话的人去查。
       // 所有回复（群聊、私聊、主动发起、表情包配文）都会自动带上，
       // 所以"对她说话的语气跟好感度挂钩"不需要在每个调用点重复写。
