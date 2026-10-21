@@ -475,6 +475,8 @@ const server = http.createServer(async (req, res) => {
       if (typeof body.muted === 'boolean') patch.muted = body.muted;
       if (body.affinity === null) patch.affinity = null;
       else if (Number.isFinite(body.affinity)) patch.affinity = body.affinity;
+      // 关系称号：空字符串 = 取消（saveOverride 里会删掉这个键）
+      if (typeof body.bond === 'string') patch.bond = body.bond;
 
       const saved = await saveOverride(qq, patch);
       const after = loadAll().members.find((x) => String(x.qq) === qq);
