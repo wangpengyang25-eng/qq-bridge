@@ -5,6 +5,12 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>大肥鱼控制台 · 群友档案</title>
 <link rel="stylesheet" href="/style.css">
+<script>
+  // 在首帧之前定好主题，避免闪一下白/黑
+  try {
+    if (localStorage.getItem('qqb-theme') === 'dark') document.documentElement.dataset.theme = 'dark';
+  } catch (e) { /* 隐私模式下 localStorage 可能抛错，忽略 */ }
+</script>
 </head>
 <body>
 <div class="glow" aria-hidden="true"></div>
@@ -17,7 +23,10 @@
       <p class="tagline">谁熟、谁冷、下次该找谁说话</p>
     </div>
   </div>
-  <div class="status" id="status">连接中…</div>
+  <div class="top-actions">
+    <button class="sm ghost" id="themeBtn" title="切换明暗">深色</button>
+    <div class="status" id="status">连接中…</div>
+  </div>
 </header>
 
 <section class="overview" id="overview"></section>

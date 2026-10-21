@@ -4,14 +4,8 @@ const $ = (sel) => document.querySelector(sel);
 const esc = (s) =>
   String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-// 等级色：暖色阶梯（灰褐 → 沙 → 陶土 → 琥珀 → 金），与 style.css 的 .lv* 对应
-const LEVEL_COLOR = {
-  lv0: '#7d7168',
-  lv1: '#c9a07a',
-  lv2: '#e59262',
-  lv3: '#f0a868',
-  lv4: '#f5c76b',
-};
+// 等级色不写在这里：统一走 style.css 的 --lv0..--lv4 变量，
+// 切主题时自动跟着变，JS 不需要知道具体色值。
 
 const state = {
   members: [],
@@ -83,14 +77,14 @@ function renderOverview(st) {
 
   const bars = (st.levels || [])
     .filter((l) => l.count > 0)
-    .map((l) => `<i style="width:${(l.count / totalLv) * 100}%;background:${LEVEL_COLOR[l.key]}"></i>`)
+    .map((l) => `<i style="width:${(l.count / totalLv) * 100}%;background:var(--${l.key})"></i>`)
     .join('');
 
   const legend = (st.levels || [])
     .filter((l) => l.count > 0)
     .map(
       (l) =>
-        `<span><b style="background:${LEVEL_COLOR[l.key]}"></b>${esc(l.name)} <em>${l.count}</em></span>`
+        `<span><b style="background:var(--${l.key})"></b>${esc(l.name)} <em>${l.count}</em></span>`
     )
     .join('');
 
@@ -282,6 +276,27 @@ $('#sortBtn').addEventListener('click', () => {
   $('#sortBtn').textContent = SORT_LABEL[state.sort];
   renderList();
 });
+
+// 明暗切换：默认浅色，选择存 localStorage（head 里的内联脚本会先套上，避免闪屏）
+const THEME_KEY = 'qqb-theme';
+const isDark = () => document.documentElement.dataset.theme === 'dark';
+
+function syncThemeBtn() {
+  // 按钮显示的是"切过去之后会变成什么"
+  $('#themeBtn').textContent = isDark() ? '浅色' : '深色';
+}
+
+$('#themeBtn').addEventListener('click', () => {
+  const next = isDark() ? 'light' : 'dark';
+  if (next === 'dark') document.documentElement.dataset.theme = 'dark';
+  else delete document.documentElement.dataset.theme;
+  try {
+    localStorage.setItem(THEME_KEY, next);
+  } catch { /* 隐私模式下写不了，忽略 */ }
+  syncThemeBtn();
+});
+
+syncThemeBtn();
 
 (async function main() {
   try {
