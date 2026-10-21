@@ -201,6 +201,8 @@ export const DEFAULTS = {
     maxCharsPerMessage: 900,
     maxPartsGroup: 2,     // 群聊最多分几条（默认 2，够一次补充说明；再多就刷屏）
     maxPartsPrivate: 2,
+    // 每条消息发出去前的停顿。秒回不像人；0 = 不等待（测试用）
+    replyDelayMs: 0,
   },
 
   logFile: 'logs/bridge.log',

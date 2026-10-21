@@ -808,6 +808,16 @@ export class Router {
 
   // ---------- 面板设置（运行时可改，合并到配置之上）----------
 
+  /** 每条消息发出去之前停顿多久（模拟"人在打字"，别秒回） */
+  effReplyDelayMs() {
+    const o = this.readControl().values.output || {};
+    const ms = o.replyDelaySec === undefined
+      ? this.cfg.output?.replyDelayMs ?? 0
+      : o.replyDelaySec * 1000;
+    const n = Number(ms);
+    return Number.isFinite(n) ? Math.max(0, Math.min(30000, n)) : 0;
+  }
+
   /** 能力开关：工具与上下文。注意有些状态被对象在构造时就抓走了，要一并改。 */
   applyFeatureControl() {
     const f = this.readControl().values.features || {};
@@ -1323,9 +1333,15 @@ export class Router {
       const plain = markdownToPlain(raw) || '（模型返回了空内容）';
       const parts = splitMessage(plain, this.cfg.output.maxCharsPerMessage, maxParts);
 
+      // 每条消息之间停顿：秒回不像人，也容易让人觉得在刷屏。
+      // 停顿发生在"发"之前，所以第一条也会等，整体读起来像在打字。
+      const delayMs = this.effReplyDelayMs();
+      const pause = () => (delayMs > 0 ? new Promise((r) => setTimeout(r, delayMs)) : Promise.resolve());
+
       const sendSticker = async () => {
         if (!stickerFile) return;
         try {
+          await pause();
           if (evt.scene === 'group') await this.bot.sendGroup(evt.sceneId, { image: stickerFile });
           else await this.bot.sendPrivate(evt.sceneId, { image: stickerFile });
           this.stats.stickers += 1;
@@ -1338,6 +1354,7 @@ export class Router {
       // 表情单独成一条消息（不带 @、不带引用），看起来才像群友随手甩的图
       if (this.cfg.stickers?.position === 'before') await sendSticker();
       for (const part of parts) {
+        await pause();
         await sender(part);
       }
       if (this.cfg.stickers?.position !== 'before') await sendSticker();

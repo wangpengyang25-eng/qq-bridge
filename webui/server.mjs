@@ -223,6 +223,7 @@ function readRawSettings() {
       },
       output: {
         maxParts: cfg.output?.maxPartsGroup ?? 2,
+        replyDelaySec: Math.round((cfg.output?.replyDelayMs ?? 0) / 1000),
       },
       chat: {
         followUp: cfg.mode?.followUp?.enabled !== false,

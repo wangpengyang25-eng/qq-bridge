@@ -86,6 +86,7 @@ const FIELD_META = {
   },
   output: {
     maxParts: ['一次最多分几条', '条'],
+    replyDelaySec: ['每条消息发出前停顿', '秒'],
   },
   sticker: {
     enabled: ['启用', 'bool'],
