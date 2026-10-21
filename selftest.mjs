@@ -1580,6 +1580,23 @@ async function main() {
     check('问句：陈述句不算', looksLikeQuestion('我今天吃过了。') === false);
     check('问句：空串不算', looksLikeQuestion('') === false);
 
+    // 被 @ 过的窗口：@ 她之后接着说，不用再 @
+    const a = new FollowTracker({ enabled: true, windowMs: 90000, addressedMs: 180000 });
+    a.markAddressed('g1', 'u1', T0);
+    check(
+      '连续：@ 过她之后，本人接着说 → 接',
+      a.isFollowing({ sceneId: 'g1', userId: 'u1', now: T0 + 60000 }).reason === 'addressed'
+    );
+    check('连续：@ 窗口对别人无效', a.isFollowing({ sceneId: 'g1', userId: 'u2', now: T0 + 60000 }).ok === false);
+    check('连续：@ 窗口 3 分钟后失效', a.isFollowing({ sceneId: 'g1', userId: 'u1', now: T0 + 181000 }).ok === false);
+    const a2 = new FollowTracker({ enabled: true, addressedMs: 180000 });
+    a2.markAddressed('g1', 'u1', T0);
+    check(
+      '连续：别人插话也作废 @ 窗口',
+      a2.noteSpeaker('g1', 'u2') === true && a2.isFollowing({ sceneId: 'g1', userId: 'u1', now: T0 + 1000 }).ok === false
+    );
+    check('连续：没 @ 就没这个窗口', new FollowTracker({}).isFollowing({ sceneId: 'g1', userId: 'u1' }).ok === false);
+
     // @ 了别人就不该接
     check('连续：@ 别人 = 不是对她说的', addressedToOthers({ ats: ['999'], isAtMe: false }) === true);
     check('连续：@ 里包含她 = 就是对她说的', addressedToOthers({ ats: ['999', '1'], isAtMe: true }) === false);

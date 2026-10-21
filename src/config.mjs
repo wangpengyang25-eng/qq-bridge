@@ -37,6 +37,7 @@ export const DEFAULTS = {
     followUp: {
       enabled: true,
       windowMs: 90000,     // 她问完问题后，等回答的时间
+      addressedMs: 180000, // 被 @ 之后，同一个人 3 分钟内接着说都不用再 @
     },
   },
 
@@ -175,6 +176,18 @@ export const DEFAULTS = {
     dailyLimit: 20,        // 每天最多插几次
     windowMs: 180000,      // 判断"群里够不够热闹"的观察窗口
     minActivity: 3,        // 窗口内至少要有几条有内容的消息
+
+    // 观战：读群聊记录，由模型自己判断要不要开口（默认关）
+    // 每看一次就是一次模型调用，所以三重闸门：多久看一次 / 够几条才看 / 每天最多说几次
+    watch: {
+      enabled: false,
+      everyMs: 120000,    // 多久扫一次
+      minNew: 5,          // 该群至少新增几条消息才值得看一眼
+      cooldownMs: 900000, // 同一个群两次"看"的最小间隔（15 分钟）
+      dailyLimit: 10,     // 每天最多主动说几次
+      maxChars: 40,       // 接话的字数上限
+      quietHours: { start: 1, end: 8 },
+    },
 
     // ---- 主动发起谈话（定时器驱动，没人说话也会开口）----
     // 和上面这些"有消息时顺便接一句"是两套东西，默认全关。

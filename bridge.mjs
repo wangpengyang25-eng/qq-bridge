@@ -90,6 +90,7 @@ async function main() {
     log('[boot] 成员档案：已关闭');
   }
   router.startInitiative();
+  router.startWatch();
 
   // 定期把运行状态写出来，面板只读它
   const reporter = new RuntimeReporter({
@@ -106,6 +107,7 @@ async function main() {
     bot.stop();
     try {
       router?.stopInitiative();
+      router?.stopWatch();
       reporter?.stop();
     } catch { /* 忽略 */ }
     // 退出前把成员档案强制写一次，否则最后 flushMs 内的记录会丢

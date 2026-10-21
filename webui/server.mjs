@@ -224,6 +224,7 @@ function readRawSettings() {
         onQuestion: p.onQuestion,
         cooldownSec: Math.round((p.minIntervalMs ?? 600000) / 1000),
         dailyLimit: p.dailyLimit,
+        watch: p.watch?.enabled === true,
       },
       output: {
         maxParts: cfg.output?.maxPartsGroup ?? 2,

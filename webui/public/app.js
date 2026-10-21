@@ -100,6 +100,7 @@ const FIELD_META = {
   },
   interject: {
     enabled: ['启用', 'bool'],
+    watch: ['观战：读群聊记录，自己判断要不要开口', 'bool'],
     onImage: ['有人发图就触发', 'bool'],
     onQuestion: ['有人征求意见就触发', 'bool'],
     cooldownSec: ['同一个群两次的最小间隔', '秒'],

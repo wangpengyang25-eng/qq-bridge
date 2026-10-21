@@ -80,6 +80,7 @@ export const SCHEMA = {
     onQuestion: { type: 'bool' },
     cooldownSec: { type: 'int', min: 0, max: 86400 },
     dailyLimit: { type: 'int', min: 0, max: 1000 },
+    watch: { type: 'bool' }, // 观战：读群聊记录自己判断要不要开口
   },
 };
 

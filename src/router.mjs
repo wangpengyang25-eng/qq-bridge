@@ -132,6 +132,11 @@ export class Router {
       isMuted: (qq) => this.readOverrides().muted.has(String(qq)),
     });
     this.initiativeTimer = null;
+    // 观战（读群聊记录自己判断要不要开口）
+    this.watchTimer = null;
+    this.watchState = new Map(); // sceneId -> { at, seen }
+    this.watchDay = '';
+    this.watchCount = 0;
     // 面板设置要覆盖到的配置，先存一份"基线"（来自 config.json），
     // 这样每次应用面板设置都是"基线 + 覆盖"，不会越改越偏。
     this._baseInitiative = JSON.parse(JSON.stringify(this.initiative.cfg));
@@ -177,7 +182,8 @@ export class Router {
     // 连续对话：一个人在跟她聊时，短时间内不 @ 也能接着说
     this.follow = new FollowTracker({
       enabled: cfg.mode?.followUp?.enabled !== false,
-      windowMs: cfg.mode?.followUp?.windowMs ?? 180000,
+      windowMs: cfg.mode?.followUp?.windowMs ?? 90000,
+      addressedMs: cfg.mode?.followUp?.addressedMs ?? 180000,
     });
 
     this.stats = {
@@ -368,6 +374,11 @@ export class Router {
     let following = false;
     if (inScope) {
       this.applyFollowControl();
+      // 被他 @ 了：这是最明确的"我在跟你说话"，直接开 3 分钟窗口
+      if (evt.isAtMe) {
+        this.follow.markAddressed(evt.sceneId, evt.userId);
+        log(`[router] ${evt.userName || evt.userId} @ 了她，开启连续对话窗口`);
+      }
       if (this.follow.noteSpeaker(evt.sceneId, evt.userId)) {
         log(`[router] 群 ${evt.sceneId} 有人插话，连续对话结束`);
       }
@@ -379,7 +390,9 @@ export class Router {
       following = followResult.ok;
       if (following) {
         log(
-          `[router] 连续对话（${followResult.reason === 'quote' ? '引用' : '答她的话'}）：${evt.userName || evt.userId} 没 @ 也接`
+          `[router] 连续对话（${
+            followResult.reason === 'quote' ? '引用' : followResult.reason === 'addressed' ? '刚 @ 过' : '答她的话'
+          }）：${evt.userName || evt.userId} 没 @ 也接`
         );
       }
       // @ 了别人：这句不是说给她听的，不接（引用别人的也不接）
@@ -814,6 +827,120 @@ export class Router {
         );
         return;
     }
+  }
+
+  // ---------- 观战：读群聊记录，自己判断要不要开口 ----------
+  //
+  // 和 chime（按规则接一句）不同，这条是**模型自己决定**：
+  // 每隔一段时间看一眼最近的群聊，回 PASS 就继续潜水，回一句话就发出去。
+  // 成本靠三重闸门控制：cooldownMs（看一次的最小间隔）、minNew（够几条才值得看）、dailyLimit。
+
+  startWatch() {
+    if (this.watchTimer) return true;
+    const every = Math.max(30000, Number(this.cfg.proactive?.watch?.everyMs) || 120000);
+    this.watchTimer = setInterval(() => {
+      this.runWatch().catch((e) => log(`[watch] ${e.message}`));
+    }, every);
+    if (typeof this.watchTimer.unref === 'function') this.watchTimer.unref();
+    log(`[watch] 观战已启动：每 ${Math.round(every / 1000)}s 看一眼`);
+    return true;
+  }
+
+  stopWatch() {
+    if (this.watchTimer) {
+      clearInterval(this.watchTimer);
+      this.watchTimer = null;
+    }
+  }
+
+  async runWatch(now = Date.now()) {
+    const w = this.cfg.proactive?.watch || {};
+    if (w.enabled !== true) return null;
+    if (!this.state.enabled || this.isPaused()) return null;
+    if (this.readControl().values.interject?.watch === false) return null;
+
+    // 免打扰
+    const hour = new Date(now).getHours();
+    const qs = Number(w.quietHours?.start ?? 1);
+    const qe = Number(w.quietHours?.end ?? 8);
+    const quiet = qs === qe ? false : qs < qe ? hour >= qs && hour < qe : hour >= qs || hour < qe;
+    if (quiet) return null;
+
+    const today = new Date(now).toDateString();
+    if (this.watchDay !== today) {
+      this.watchDay = today;
+      this.watchCount = 0;
+    }
+    if (this.watchCount >= Number(w.dailyLimit ?? 10)) return null;
+
+    for (const sceneId of this.ambient.groups.keys()) {
+      const arr = this.ambient.groups.get(sceneId) || [];
+      const st = this.watchState.get(sceneId) || { at: 0, seen: 0 };
+      const fresh = arr.length - st.seen;
+      if (fresh < Number(w.minNew ?? 5)) continue;
+      if (now - st.at < Number(w.cooldownMs ?? 900000)) continue;
+
+      st.at = now;
+      st.seen = arr.length;
+      this.watchState.set(sceneId, st);
+
+      const transcript = this.ambient.snapshot(sceneId);
+      if (!transcript) continue;
+
+      let say = '';
+      try {
+        say = await this.decideWatch(transcript, w);
+      } catch (e) {
+        log(`[watch] 判断失败：${e.message}`);
+        continue;
+      }
+      if (!say) continue; // PASS，继续潜水
+
+      try {
+        await this.bot.sendGroup(sceneId, { text: say });
+        this.watchCount += 1;
+        this.stats.chime = (this.stats.chime || 0) + 1;
+        log(`[watch] 群 ${sceneId} 接了一句：${say}`);
+      } catch (e) {
+        log(`[watch] 发送失败：${e.message}`);
+      }
+      return say; // 一次只在一个群开口
+    }
+    return null;
+  }
+
+  /** 让模型看一眼群聊，决定要不要接。返回要发的话，或空串表示不接 */
+  async decideWatch(transcript, w = {}) {
+    const voice = String(this.cfg.llm?.systemPrompt || '').slice(0, 600);
+    const maxLen = Number(w.maxChars ?? 40);
+    const out = await complete(
+      this.cfg,
+      [
+        {
+          role: 'system',
+          content:
+            `你是这个 QQ 群里的一个成员。下面是你的人设摘要：\n${voice}\n\n` +
+            `现在给你看群里最近聊的几句，判断你要不要开口。\n` +
+            `规则：\n` +
+            `- 绝大多数时候不必开口。宁可沉默。\n` +
+            `- 只有在「有人提问没人接」「话题正好是你熟的」「气氛凉了需要有人递一句」时才开口。\n` +
+            `- 开口只说一句，${maxLen} 字以内，像群里随口接的那种，不要 @ 任何人。\n` +
+            `- 不开口就只输出 PASS，不要输出别的内容。`,
+        },
+        { role: 'user', content: `【最近的群聊】\n${transcript}` },
+      ],
+      { maxTokens: 160, temperature: 0.8 }
+    );
+
+    const text = String(out || '')
+      .trim()
+      .replace(/^["'「『]|["'」』]$/g, '')
+      .trim();
+    if (!text) return '';
+    if (/^PASS\b/i.test(text)) return '';
+    // 太长的不要（模型有时会写一大段）
+    if (text.length > maxLen * 2) return '';
+    return text.split('\n')[0].trim();
   }
 
   // ---------- 面板设置（运行时可改，合并到配置之上）----------
