@@ -7,7 +7,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { log } from './logger.mjs';
-import { markdownToPlain, splitMessage } from './text.mjs';
+import { markdownToPlain, splitMessage, stripParentheticals } from './text.mjs';
 import { chat, complete, sessionKey, clearHistory, listSessions } from './llm.mjs';
 import { collectImages } from './vision.mjs';
 import { webSearch, formatResults } from './search.mjs';
@@ -808,6 +808,12 @@ export class Router {
 
   // ---------- 面板设置（运行时可改，合并到配置之上）----------
 
+  /** 不写括号里的动作描写（面板可改） */
+  effNoActionHints() {
+    const v = this.readControl().values.output?.noActionHints;
+    return typeof v === 'boolean' ? v : this.cfg.output?.noActionHints === true;
+  }
+
   /** 每条消息发出去之前停顿多久（模拟"人在打字"，别秒回） */
   effReplyDelayMs() {
     const o = this.readControl().values.output || {};
@@ -874,11 +880,15 @@ export class Router {
     // file 没设过是 undefined（跟随配置）；设成空串表示"用默认角色"
     const persona = c.file === undefined ? (this._cfgPersona || '') : c.file;
     const r = this.persona.load({ persona, overrideFewshot: c.fewshot });
-    if (r.prompt && r.prompt !== this._appliedPersona) {
-      this.cfg.llm.systemPrompt = r.prompt;
-      this._appliedPersona = r.prompt;
+    // 不写括号动作：提示词里禁一次，发送前再硬剥一次。
+    // 只靠提示词的话，模型还是会忍不住夹两句舞台指示。
+    const noHints = this.effNoActionHints();
+    const want = noHints ? `${r.prompt}\n\n【输出格式】不要写括号里的动作、神态、场景描写——那些旁白不要。直接说话。` : r.prompt;
+    if (want && want !== this._appliedPersona) {
+      this.cfg.llm.systemPrompt = want;
+      this._appliedPersona = want;
       log(
-        `[persona] 人设已更新：${r.source || '(空)'}${r.fewshotName ? ` + 示范 ${r.fewshotName}` : ''}`
+        `[persona] 人设已更新：${r.source || '(空)'}${r.fewshotName ? ` + 示范 ${r.fewshotName}` : ''}${noHints ? '（无动作描写）' : ''}`
       );
     }
     // 关系措辞表跟着角色卡走
@@ -1333,7 +1343,12 @@ export class Router {
           s.calls += u.calls || 0;
         },
       });
-      const plain = markdownToPlain(raw) || '（模型返回了空内容）';
+      const plainRaw = markdownToPlain(raw) || '（模型返回了空内容）';
+      // 剥掉括号里的动作描写；剥完空了的段落直接丢掉，
+      // 全都空了才退回原文（总比一句都不说好）
+      const plain = this.effNoActionHints()
+        ? stripParentheticals(plainRaw) || stripParentheticals(plainRaw.replace(/（[^）]*）|\([^)]*\)/g, '')) || plainRaw
+        : plainRaw;
       const parts = splitMessage(plain, this.cfg.output.maxCharsPerMessage, maxParts);
 
       // 每条消息之间停顿：秒回不像人，也容易让人觉得在刷屏。

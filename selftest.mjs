@@ -1556,6 +1556,20 @@ async function main() {
     check('连续：@ 全体（ats 里有她）仍然算对她', addressedToOthers({ ats: ['1'], isAtMe: true }) === false);
   }
 
+  console.log('\n--- 23. 剥掉括号里的动作描写 ---');
+  {
+    const { stripParentheticals } = await import('./src/text.mjs');
+    check('剥括号：整句动作被删掉', stripParentheticals('@丁公 （她连眼皮都没抬）') === '@丁公', stripParentheticals('@丁公 （她连眼皮都没抬）'));
+    check(
+      '剥括号：句中的动作被删掉、正文保留',
+      stripParentheticals('打我？行啊。\n\n（顿了一下）不过打完了记得把甜点端过来。').includes('甜点端过来')
+    );
+    check('剥括号：半角括号也处理', stripParentheticals('前半 (action) 后半') === '前半 后半', stripParentheticals('前半 (action) 后半'));
+    check('剥括号：只有动作时返回空串', stripParentheticals('（只是动作）') === '');
+    check('剥括号：嵌套能被剥干净', stripParentheticals('（外层（内层）还有）') === '', JSON.stringify(stripParentheticals('（外层（内层）还有）')));
+    check('剥括号：没有括号时原样返回', stripParentheticals('就是一句话') === '就是一句话');
+  }
+
   const failed = results.filter((r) => !r.ok);
   console.log('\n========================================');
   console.log(`  自测结果：${results.length - failed.length}/${results.length} 通过`);

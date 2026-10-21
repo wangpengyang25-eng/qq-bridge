@@ -35,6 +35,7 @@ export const SCHEMA = {
   output: {
     maxParts: { type: 'int', min: 1, max: 5 }, // 一次最多分几条消息发出去
     replyDelaySec: { type: 'int', min: 0, max: 30 }, // 每条消息发出前的停顿
+    noActionHints: { type: 'bool' }, // 不写括号里的动作/神态描写
   },
   chat: {
     followUp: { type: 'bool' }, // 一个人在跟她聊时，不用每句都 @

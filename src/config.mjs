@@ -203,6 +203,8 @@ export const DEFAULTS = {
     maxPartsPrivate: 2,
     // 每条消息发出去前的停顿。秒回不像人；0 = 不等待（测试用）
     replyDelayMs: 0,
+    // 不写括号里的动作/神态描写，只留话。开着的时候提示词里会禁，发出前也会硬剥一遍
+    noActionHints: false,
   },
 
   logFile: 'logs/bridge.log',

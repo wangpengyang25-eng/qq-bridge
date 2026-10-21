@@ -108,3 +108,25 @@ export function splitMessage(text, maxChars = 900, maxParts = 0) {
 export function stripCqCode(raw) {
   return String(raw ?? '').replace(/\[CQ:[^\]]*\]/g, '').trim();
 }
+
+/**
+ * 删掉括号里的动作/神态描写。
+ *
+ * 聊天里那些「（她把杯子放下，指尖还扣在杯沿上）」读起来像舞台指示，
+ * 一条消息里夹两三处就很出戏。这里直接剥掉，只留话。
+ *
+ * 全角和半角都处理；嵌套的靠循环剥到稳定。剥完可能是空串，由调用方兜底。
+ */
+export function stripParentheticals(text) {
+  let out = String(text ?? '');
+  for (let i = 0; i < 5; i += 1) {
+    const next = out.replace(/（[^（）]*）/g, '').replace(/\([^()]*\)/g, '');
+    if (next === out) break;
+    out = next;
+  }
+  return out
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/ +\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}

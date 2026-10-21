@@ -87,6 +87,7 @@ const FIELD_META = {
   output: {
     maxParts: ['一次最多分几条', '条'],
     replyDelaySec: ['每条消息发出前停顿', '秒'],
+    noActionHints: ['不写括号里的动作/神态，直接说话', 'bool'],
   },
   sticker: {
     enabled: ['启用', 'bool'],
