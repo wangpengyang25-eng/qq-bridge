@@ -380,8 +380,32 @@ node server.mjs           # http://127.0.0.1:5173
 这层数据是为后续三个功能铺的路：读取并回复群友的表情包（`stats.stickersSeen`）、
 主动发起谈话（`stats.proactives` + `muted` + 候选排序）、以及"喜欢和谁聊"本身就是这张表。
 
-> 目前 **bridge 还不会写这个文件**，面板数据来自 `seed.mjs`。
-> 真正接上需要在 `src/router.mjs` 每收到一条群消息时调 `recordMessage()` 并定期落盘。
+### bridge 已经把数据写出来了
+
+`src/members.mjs` 在 `src/router.mjs` 里挂着：**白名单群内的每条消息**（不只是被 @ 的）
+都会记一笔，定时（默认 60 秒）落盘到 `data/members.json`，退出时强制写一次。
+纯内存计数，不调任何 API。
+
+```jsonc
+// config.json —— 都可以不写，下面是默认值
+"members": {
+  "enabled": true,
+  "file": "data/members.json",
+  "flushMs": 60000,     // 多久落盘一次（有改动才写）
+  "maxMembers": 500     // 上限，防止文件无限长
+}
+```
+
+**写文件的分工**（这是关键，两边不会互相覆盖）：
+
+| 文件 | 谁写 | 内容 |
+|---|---|---|
+| `data/members.json` | **只有 bridge** | 计数器、亲密度、时间戳 |
+| `webui/data/overrides.json` | **只有面板** | 备注、静音、手动改的亲密度 |
+
+面板显示时把 overrides 盖在 members 上面，所以你在界面上改的备注不会被下一轮计数冲掉。
+
+> `data/` 已进 `.gitignore` —— 里面是真实群友的 QQ 号和互动数据。
 
 ## 目录结构
 
@@ -401,7 +425,7 @@ qq-bridge/
 │   └── 04-线条狗/
 ├── state.json          运行状态：开关 + 已绑定管理员（自动生成）
 ├── start.bat           只启桥（不启 NapCat），手工排查时用
-├── selftest.mjs        端到端自测（125 项断言）
+├── selftest.mjs        端到端自测（146 项断言）
 ├── probe_llm.mjs       模型链路直连测试
 ├── probe_onebot.mjs    NapCat / OneBot 连通性与账号查询
 ├── probe_stickers.mjs  列出各套情绪名 + 重新生成 预览.html
@@ -423,10 +447,15 @@ qq-bridge/
 │   ├── fetchpage.mjs   读网页正文（含本机与内网地址门禁）
 │   ├── search.mjs      联网搜索（抓 Bing 结果页）
 │   ├── vision.mjs      图片下载转 base64
-│   └── text.mjs        Markdown 转纯文本、分片
+│   ├── text.mjs        Markdown 转纯文本、分片
+│   ├── profile.mjs     ★ 成员档案与亲密度规则（**bridge 与面板共用这一份**）
+│   └── members.mjs     成员档案存储：定时落盘 data/members.json
+├── data/
+│   └── members.json    ★ 群友档案（bridge 独占写入，已 gitignore）
 ├── webui/              ★ 本地控制台：群友档案 / 亲密度（见下节）
 │   ├── server.mjs      本地 HTTP 服务，只监听 127.0.0.1
-│   ├── src/profile.mjs 成员档案与亲密度规则 ← 后续功能的公共地基
+│   ├── src/profile.mjs 转发引用（真正的规则在 ../src/profile.mjs）
+│   ├── src/paths.mjs   路径解析：成员档案 / 人工编辑文件
 │   ├── scripts/        seed.mjs 造演示数据 / gen-avatars.mjs 生头像
 │   └── public/         单页界面，零构建零依赖
 └── logs/bridge.log     运行日志

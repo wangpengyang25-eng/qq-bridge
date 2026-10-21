@@ -42,6 +42,7 @@ import {
   searchPredicate,
 } from './src/llm.mjs';
 import { extractContent } from './src/onebot.mjs';
+import { MemberStore } from './src/members.mjs';
 import { loadConfig } from './src/config.mjs';
 import { parseBing } from './src/search.mjs';
 import { evaluateExpression } from './src/calc.mjs';
@@ -249,6 +250,10 @@ const hasSeg = (params, type) => (params.message || []).some((s) => s.type === t
 // ---------------- 启动一个 bridge ----------------
 function startBridge(name, cfgObj) {
   const cfgPath = path.join(TMP, `config-${name}.json`);
+  // 每个实例用自己的成员档案文件，避免几个 bridge 并发写同一个文件
+  cfgObj.members = cfgObj.members || {};
+  if (!cfgObj.members.file) cfgObj.members.file = `data/members-${name}.json`;
+  if (cfgObj.members.flushMs == null) cfgObj.members.flushMs = 400;
   fs.writeFileSync(cfgPath, JSON.stringify(cfgObj, null, 2));
   let out = '';
   const proc = spawn(process.execPath, [path.join(HERE, 'bridge.mjs')], {
@@ -336,6 +341,29 @@ async function main() {
     );
     check('回复里 @ 了提问者', hasSeg(g1, 'at'));
     check('回复引用了原消息', hasSeg(g1, 'reply'));
+
+    // 成员档案的端到端验证：消息要让 router 真的记进去并落盘
+    console.log('\n--- 2b. 成员档案端到端 ---');
+    {
+      // 再补一条非 @ 的普通发言：档案应该把"没 @ 的"也记下来
+      pushGroup({ text: '随手说一句', at: false, name: '群友乙', userId: 67891 });
+      await sleep(1200); // 等 flushMs(400ms) 触发一次落盘
+
+      const memPath = path.join(TMP, 'data', 'members-main.json');
+      const exists = fs.existsSync(memPath);
+      check('档案：bridge 已生成 data/members.json', exists, memPath);
+      if (exists) {
+        const doc = JSON.parse(fs.readFileSync(memPath, 'utf8'));
+        const atUser = doc.members.find((x) => x.qq === '67890');
+        const plainUser = doc.members.find((x) => x.qq === '67891');
+        check('档案：@ 过机器人的群友被记录', !!atUser && atUser.stats.ats === 1, JSON.stringify(atUser?.stats));
+        check('档案：没 @ 的群友也被记录（不只是回答过的）', !!plainUser && plainUser.stats.messages === 1, JSON.stringify(plainUser?.stats));
+        // 规则：被 @ 一次 +2，且不再额外叠加"普通发言 +1"
+        check('档案：被 @ 的加成生效（+2，不重复计发言分）', atUser?.affinity === 2, String(atUser?.affinity));
+        check('档案：机器人回过它记了数', (atUser?.stats.replies ?? 0) === 1, String(atUser?.stats.replies));
+        check('档案：文件结构带版本号', doc.version === 1 && Array.isArray(doc.members), `v${doc.version}`);
+      }
+    }
     check(
       '背景按需注入：自足的问题不带群聊背景',
       !lastUserText().includes('【群里刚才聊到'),
@@ -862,6 +890,119 @@ async function main() {
       dead.proc.kill();
       await sleep(200);
     }
+  }
+
+  console.log('\n--- 18. 成员档案（bridge 侧） ---');
+  {
+    const memDir = path.join(TMP, 'members');
+    fs.rmSync(memDir, { recursive: true, force: true });
+    const memFile = path.join(memDir, 'members.json');
+
+    const store = new MemberStore({ file: memFile, flushMs: 100000, maxMembers: 3 });
+    check('档案：初始为空', store.size === 0);
+
+    store.record({ userId: '1001', userName: '甲' });
+    store.record({ userId: '1001', userName: '甲', isAtMe: true });
+    check('档案：普通发言 +1、被 @ +2', store.get('1001').affinity === 3, String(store.get('1001').affinity));
+
+    for (let i = 0; i < 20; i++) store.record({ userId: '1001', userName: '甲' });
+    check(
+      '档案：日上限生效（6 分封顶，@ 不占配额）',
+      store.get('1001').affinity === 8,
+      String(store.get('1001').affinity)
+    );
+
+    store.record({ userId: '1001', userName: '甲改名了' });
+    check('档案：群名片跟随最新', store.get('1001').nick === '甲改名了', store.get('1001').nick);
+
+    store.record({ userId: '1002', userName: '乙', hasSticker: true });
+    check('档案：表情包被计数', store.get('1002').stats.stickersSeen === 1);
+
+    store.record({ userId: '1003', userName: '丙' });
+    store.record({ userId: '1004', userName: '丁' });
+    check(
+      '档案：超过 maxMembers 不再新增',
+      store.size === 3 && store.dropped === 1,
+      `size=${store.size} dropped=${store.dropped}`
+    );
+
+    store.markReplied('1002');
+    check('档案：记录"回过它"', store.get('1002').stats.replies === 1);
+
+    store.flush(true);
+    check('档案：落盘成功', fs.existsSync(memFile));
+    {
+      const raw = JSON.parse(fs.readFileSync(memFile, 'utf8'));
+      check(
+        '档案：文件结构正确',
+        raw.version === 1 && Array.isArray(raw.members) && raw.members.length === 3,
+        `v${raw.version} n=${raw.members?.length}`
+      );
+    }
+
+    const store2 = new MemberStore({ file: memFile });
+    check(
+      '档案：重载后数据一致',
+      store2.size === 3 && store2.get('1001').affinity === 8,
+      `${store2.size} / ${store2.get('1001')?.affinity}`
+    );
+    store2.stop();
+
+    // 坏文件不该拖垮启动：应备份后从空开始
+    fs.writeFileSync(memFile, '{ 这不是合法 JSON', 'utf8');
+    const store3 = new MemberStore({ file: memFile });
+    const backedUp = fs.readdirSync(memDir).some((f) => f.includes('.broken-'));
+    check('档案：坏文件不抛错，已备份并重建', store3.size === 0 && backedUp, `backup=${backedUp}`);
+    store3.stop();
+
+    // 停机期间该掉的亲密度要在载入时补算
+    const decayFile = path.join(memDir, 'decay.json');
+    const oldTs = Date.now() - 12.5 * 86400000;
+    fs.writeFileSync(
+      decayFile,
+      JSON.stringify({
+        version: 1,
+        members: [
+          {
+            qq: '9',
+            nick: '老',
+            affinity: 50,
+            stats: { messages: 1, ats: 0, replies: 0, stickersSeen: 0, proactives: 0 },
+            note: '',
+            muted: false,
+            firstSeenAt: oldTs,
+            lastSeenAt: oldTs,
+            dayBucket: { date: '2000-01-01', scored: 0 },
+            decayedAt: oldTs,
+          },
+        ],
+      }),
+      'utf8'
+    );
+    const store4 = new MemberStore({ file: decayFile });
+    // 12.5 天没说话，前 7 天不扣，之后 5 天每天 -1 → 45
+    check('档案：载入时补算离线衰减', store4.get('9').affinity === 45, String(store4.get('9').affinity));
+    store4.stop();
+
+    // 表情包识别（决定 stickersSeen 能不能真的记到）
+    const eSticker = extractContent({
+      message: [{ type: 'image', data: { url: 'https://e.com/s.gif', sub_type: 1 } }],
+    });
+    check(
+      '表情包：sub_type=1 的图记为表情、不进视觉链路',
+      eSticker.stickers.length === 1 && eSticker.images.length === 0,
+      JSON.stringify(eSticker)
+    );
+    const eMface = extractContent({ message: [{ type: 'mface', data: { url: 'https://e.com/m.jpg' } }] });
+    check('表情包：mface 段被识别', eMface.stickers.length === 1, JSON.stringify(eMface));
+    const eNormal = extractContent({
+      message: [{ type: 'image', data: { url: 'https://e.com/photo.png' } }, { type: 'text', data: { text: '看图' } }],
+    });
+    check(
+      '表情包：普通照片仍走视觉链路、不算表情',
+      eNormal.images.length === 1 && eNormal.stickers.length === 0,
+      JSON.stringify(eNormal)
+    );
   }
 
   const failed = results.filter((r) => !r.ok);

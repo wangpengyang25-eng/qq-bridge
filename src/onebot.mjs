@@ -4,10 +4,23 @@ import { log } from './logger.mjs';
 import { stripCqCode } from './text.mjs';
 import { faceName, decodeFaces } from './facemap.mjs';
 
-/** 把 OneBot 消息统一成 { ats, images, text }，兼容 array / CQ 字符串两种格式 */
+/**
+ * 判断一个 image 段是不是**表情包**而不是照片。
+ * NapCat 的判定线索：sub_type=1（原创表情）、带 emoji_id、或 summary 标了"动画表情"。
+ * 表情包不进视觉链路（看成一张图没意义），只计数给成员档案用。
+ */
+function isStickerSegment(seg) {
+  const d = seg?.data || {};
+  if (String(d.sub_type) === '1') return true;
+  if (d.emoji_id || d.emoji_package_id) return true;
+  return /表情|sticker/i.test(String(d.summary || ''));
+}
+
+/** 把 OneBot 消息统一成 { ats, images, text, stickers }，兼容 array / CQ 字符串两种格式 */
 export function extractContent(msg) {
   const ats = [];
   const images = [];
+  const stickers = [];
   let text = '';
   const message = msg.message;
 
@@ -19,7 +32,16 @@ export function extractContent(msg) {
       else if (t === 'image') {
         // 关键：图片要留下 URL 交给视觉链路，而不是压成 "[图片]" 文字
         const u = seg.data?.url || seg.data?.file || '';
-        if (/^https?:\/\//i.test(u)) images.push(u);
+        if (isStickerSegment(seg)) {
+          // 表情包：只计数，不交给视觉链路；也不产生文字
+          stickers.push(/^https?:\/\//i.test(u) ? u : '');
+        } else if (/^https?:\/\//i.test(u)) {
+          images.push(u);
+        }
+      } else if (t === 'mface') {
+        // 商城表情（表情包），NapCat 会带 url 或 emoji_id
+        const u = seg.data?.url || '';
+        stickers.push(/^https?:\/\//i.test(u) ? u : '');
       } else if (t === 'face') text += faceName(seg.data?.id);
     }
   } else if (typeof message === 'string') {
@@ -38,15 +60,19 @@ export function extractContent(msg) {
     const reImg = /\[CQ:image,([^\]]*)\]/g;
     while ((m = reImg.exec(raw))) {
       const um = /url=([^,\]]+)/.exec(m[1]);
-      if (um) {
-        const u = um[1].replace(/&amp;/g, '&').trim();
-        if (/^https?:\/\//i.test(u) && !images.includes(u)) images.push(u);
-      }
+      const u = um ? um[1].replace(/&amp;/g, '&').trim() : '';
+      if (!/^https?:\/\//i.test(u)) continue;
+      // sub_type=1 是原创表情（表情包），单独计数
+      if (/sub_type=1/.test(m[1])) stickers.push(u);
+      else if (!images.includes(u)) images.push(u);
     }
+    // 商城表情的 CQ 码
+    const mfaces = raw.match(/\[CQ:mface,/g);
+    if (mfaces) stickers.push(...mfaces.map(() => ''));
     if (!text) text = stripCqCode(decodeFaces(raw));
   }
 
-  return { ats, images, text: text.trim() };
+  return { ats, images, text: text.trim(), stickers };
 }
 
 export class OneBot {
@@ -186,7 +212,7 @@ export class OneBot {
   }
 
   toEvent(msg) {
-    const { ats, images, text } = extractContent(msg);
+    const { ats, images, text, stickers } = extractContent(msg);
     const selfId = String(this.selfId ?? '');
     if (msg.message_type === 'group') {
       return {
@@ -196,6 +222,8 @@ export class OneBot {
         userName: msg.sender?.card || msg.sender?.nickname || String(msg.user_id),
         text,
         images,
+        hasSticker: stickers.length > 0,
+        stickerCount: stickers.length,
         messageId: msg.message_id,
         isAtMe: selfId ? ats.includes(selfId) : ats.length > 0,
         raw: msg,

@@ -13,6 +13,7 @@ import { collectImages } from './vision.mjs';
 import { webSearch, formatResults } from './search.mjs';
 import { AmbientBuffer, needBackground } from './ambient.mjs';
 import { StickerLibrary } from './stickers.mjs';
+import { MemberStore } from './members.mjs';
 
 /** 接入开关 + 管理员绑定，落盘持久化，重启后保持上次状态 */
 export class StateStore {
@@ -91,6 +92,15 @@ export class Router {
     this.hourly = new Map();      // 会话级小时计数 {start, count}
     this.lastSearch = new Map();  // 会话级搜索冷却时间戳
     this.ambient = new AmbientBuffer(cfg.ambient || {}); // 群聊被动上下文
+    // 成员档案：群友的关系状态（亲密度 / 互动次数），定时落盘到 data/members.json
+    this.members =
+      cfg.members?.enabled === false
+        ? null
+        : new MemberStore({
+            file: cfg.members?.file,
+            flushMs: cfg.members?.flushMs,
+            maxMembers: cfg.members?.maxMembers,
+          });
     // 表情包库：目录相对 config.json 解析
     this.stickers = new StickerLibrary(
       cfg.stickers || {},
@@ -246,6 +256,11 @@ export class Router {
     const allow = this.cfg.bot.allowedGroups;
     const inScope = !allow.length || allow.includes(String(evt.sceneId));
     const answering = evt.isAtMe !== false || !this.cfg.mode.requireAt;
+
+    // 成员档案：白名单内的群，**所有**消息都记（不只是被 @ 的）。
+    // 放在最前面，这样即使下面因为开关/限流/白名单直接 return，记录也不会漏。
+    // 只计数不调 API，没有 token 成本。
+    if (inScope && this.members) this.members.record(evt);
 
     // 被动上下文：背景在**真要用时**才取（自足的问题带上纯属浪费 token），
     // 但记录是所有群消息都做的——记录只占内存，注入才花钱。
@@ -739,6 +754,9 @@ export class Router {
       }
       if (this.cfg.stickers?.position !== 'before') await sendSticker();
       this.stats.answered += 1;
+      // 记一笔"回过它"：成员档案里这个数字是主动搭话策略的输入之一。
+      // 私聊里 evt 可能没有 userId（管理员自己），markReplied 会安全地返回 false。
+      if (evt?.scene === 'group' && this.members) this.members.markReplied(evt.userId);
     } catch (e) {
       this.stats.errors += 1;
       log(`[router] 回答失败：${e.message}`);

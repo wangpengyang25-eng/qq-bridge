@@ -2,6 +2,9 @@
 config.json
 state.json
 
+# ── 成员档案：真实群友的 QQ 号与互动数据，属于个人隐私 ──
+data/
+
 # ── 运行时产物 ──
 logs/
 *.log

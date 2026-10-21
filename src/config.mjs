@@ -144,6 +144,17 @@ export const DEFAULTS = {
     minActivity: 3,        // 窗口内至少要有几条有内容的消息
   },
 
+  // ---- 成员档案（群友的关系状态层）----
+  // 记录每个群友说过多少话、被 @ 过几次、亲密度多少，落在 data/members.json。
+  // 纯内存计数 + 定时落盘，不产生任何 API 成本。
+  // 面板（webui/）读这个文件；人工编辑走它自己的 data/overrides.json，互不覆盖。
+  members: {
+    enabled: true,
+    file: 'data/members.json', // 相对 config.json 所在目录
+    flushMs: 60000,            // 多久落盘一次（有改动才写）
+    maxMembers: 500,           // 上限，防止文件无限增长
+  },
+
   // ---- 输出 ----
   output: {
     maxCharsPerMessage: 900,
@@ -190,6 +201,7 @@ export function loadConfig(file) {
   cfg.__configPath = path.resolve(file);
   cfg.logFile = path.resolve(dir, cfg.logFile);
   cfg.stateFile = path.resolve(dir, cfg.stateFile);
+  if (cfg.members?.file) cfg.members.file = path.resolve(dir, cfg.members.file);
 
   // 人设：独立文件优先，便于随时改而不动代码
   cfg.__personaSource = 'config.json 的 llm.systemPrompt';

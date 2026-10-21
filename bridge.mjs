@@ -83,12 +83,26 @@ async function main() {
   const bot = new OneBot(cfg, handlers);
 
   router = new Router(cfg, bot, state);
+  if (router.members) {
+    log(`[boot] 成员档案：${router.members.file}（已载入 ${router.members.size} 人）`);
+  } else {
+    log('[boot] 成员档案：已关闭');
+  }
 
   await bot.start();
 
   const shutdown = (sig) => {
     log(`[boot] 收到 ${sig}，正在退出...`);
     bot.stop();
+    // 退出前把成员档案强制写一次，否则最后 flushMs 内的记录会丢
+    try {
+      if (router?.members) {
+        router.members.stop();
+        log(`[members] 已落盘：${router.members.summaryLine()}`);
+      }
+    } catch (e) {
+      log(`[members] 退出前落盘失败：${e.message}`);
+    }
     setTimeout(() => process.exit(0), 200);
   };
   process.on('SIGINT', () => shutdown('SIGINT'));

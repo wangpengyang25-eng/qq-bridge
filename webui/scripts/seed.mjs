@@ -1,25 +1,37 @@
 // 造一批演示数据，方便在没有真实群流量时把界面跑起来看
 //
-//   node scripts/seed.mjs           # 生成
-//   node scripts/seed.mjs --clear   # 清空
+//   node scripts/seed.mjs           # 生成（文件里已有真实数据时会拒绝）
+//   node scripts/seed.mjs --force   # 确实要覆盖
+//   node scripts/seed.mjs --clear   # 清空（接上真实群之后用这个）
 //
 // 生成的数据走的是 src/profile.mjs 的真实计分逻辑，
 // 不是直接写死亲密度 —— 这样界面展示的分数和线上一致。
+//
+// 落点：bridge 的 data/members.json（和 bridge 自己写的是同一个文件）。
 
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { readJson, writeJson } from '../src/store.mjs';
+import { resolvePaths } from '../src/paths.mjs';
 import { createMember, recordMessage, recordProactive, recordReply, applyDecay } from '../src/profile.mjs';
 
-const HERE = path.dirname(fileURLToPath(import.meta.url));
-const FILE = path.join(HERE, '..', 'data', 'members.json');
 const DAY = 86400000;
 const now = Date.now();
+const FILE = resolvePaths().membersFile;
 
 if (process.argv.includes('--clear')) {
   await writeJson(FILE, { version: 1, members: [], updatedAt: now });
-  console.log('已清空 data/members.json');
+  console.log(`已清空 ${FILE}`);
   process.exit(0);
+}
+
+// 安全阀：这个文件到了线上就是真实群友档案，别手一抖覆盖掉
+if (!process.argv.includes('--force')) {
+  const cur = readJson(FILE, { members: [] });
+  if (Array.isArray(cur.members) && cur.members.length > 0) {
+    console.error(`拒绝覆盖：${FILE}`);
+    console.error(`  里面已经有 ${cur.members.length} 位群友的档案（多半是 bridge 的真实数据）。`);
+    console.error('  确实要覆盖请加 --force；接上真实群以后想看空面板就用 --clear。');
+    process.exit(1);
+  }
 }
 
 // QQ 号是假的，昵称也是编的
@@ -57,5 +69,5 @@ const members = seed.map((s) => {
 });
 
 await writeJson(FILE, { version: 1, members, updatedAt: now });
-console.log(`已生成 ${members.length} 个演示成员 → data/members.json`);
+console.log(`已生成 ${members.length} 个演示成员 → ${FILE}`);
 for (const m of members) console.log(`  ${m.nick.padEnd(8)} 亲密度 ${String(m.affinity).padStart(3)}`);

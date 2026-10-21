@@ -14,12 +14,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readJson, writeJson } from './src/store.mjs';
+import { resolvePaths } from './src/paths.mjs';
 import { summarize, levelOf, nextLevelGap, RULES, LEVELS, proactiveCandidates } from './src/profile.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(HERE, 'public');
-const DATA_DIR = path.join(HERE, 'data');
-const MEMBERS_FILE = path.join(DATA_DIR, 'members.json');
 
 const argv = process.argv.slice(2);
 const argOf = (name) => {
@@ -30,31 +29,11 @@ const argOf = (name) => {
 const PORT = Number(argOf('--port') || process.env.PORT || 5173);
 const HOST = '127.0.0.1';
 
-/** 找 qq-bridge 目录：命令行 > 环境变量 > 常见位置 */
-function resolveBridgeDir() {
-  const fromArg = argOf('--bridge') || process.env.QQ_BRIDGE_DIR;
-  const guesses = [
-    fromArg,
-    path.join(HERE, '..'), // 仓库内布局：webui/ 在 qq-bridge 里
-    path.join(HERE, '..', 'qq-bridge'), // 独立目录开发时
-    'E:\\QQ bot\\qq-bridge',
-  ].filter(Boolean);
-
-  for (const g of guesses) {
-    try {
-      if (fs.existsSync(path.join(g, 'config.json'))) return path.resolve(g);
-    } catch { /* 忽略无权限的路径 */ }
-  }
-  // 退一步：有任何候选目录存在也算连上了，只是没有 config.json
-  for (const g of guesses) {
-    try {
-      if (fs.existsSync(g)) return path.resolve(g);
-    } catch { /* 继续 */ }
-  }
-  return null;
-}
-
-const BRIDGE_DIR = resolveBridgeDir();
+// 路径：bridge 的成员档案 + 面板自己的编辑文件
+const PATHS = resolvePaths(argOf('--bridge'));
+const BRIDGE_DIR = PATHS.bridgeDir;
+const MEMBERS_FILE = PATHS.membersFile;   // bridge 独占写入，面板只读
+const OVERRIDES_FILE = PATHS.overridesFile; // 面板独占写入
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -67,16 +46,57 @@ const MIME = {
 };
 
 // ---------- 数据读写 ----------
+//
+// 分两个文件，各写各的，永不互相覆盖：
+//   members.json   —— bridge 独占（计数器、亲密度、时间戳）
+//   overrides.json —— 面板独占（备注、静音、手动改的亲密度）
+// 展示时把 overrides 盖在 members 上面。
 
-async function loadMembers() {
+/** 读 bridge 写的档案 + 面板的编辑，合并成展示用成员 */
+function loadAll() {
   const doc = readJson(MEMBERS_FILE, { version: 1, members: [] });
-  if (!Array.isArray(doc.members)) doc.members = [];
-  return doc;
+  const members = Array.isArray(doc.members) ? doc.members : [];
+
+  const ovDoc = readJson(OVERRIDES_FILE, { version: 1, overrides: {} });
+  const ovs = ovDoc?.overrides && typeof ovDoc.overrides === 'object' ? ovDoc.overrides : {};
+
+  const merged = members.map((m) => {
+    const ov = ovs[m.qq] || {};
+    const pinned = Number.isFinite(ov.affinity);
+    const affinity = pinned ? Math.max(0, Math.min(RULES.maxScore, ov.affinity)) : m.affinity;
+    return {
+      ...m,
+      affinity,
+      note: typeof ov.note === 'string' ? ov.note : '',
+      muted: ov.muted === true,
+      affinityPinned: pinned, // 界面用来标"这个分数是手改的"
+      level: levelOf(affinity),
+      next: nextLevelGap(affinity),
+    };
+  });
+
+  return { members: merged, updatedAt: doc.updatedAt ?? null };
 }
 
-async function saveMembers(doc) {
+/** 只写 overrides.json（bridge 不看这个文件，只有面板用） */
+async function saveOverride(qq, patch) {
+  const doc = readJson(OVERRIDES_FILE, { version: 1, overrides: {} });
+  if (!doc.overrides || typeof doc.overrides !== 'object') doc.overrides = {};
+  const cur = doc.overrides[qq] || {};
+
+  if (patch.affinity === null) {
+    delete cur.affinity; // 取消手动指定，回到自动算的值
+  } else if (Number.isFinite(patch.affinity)) {
+    cur.affinity = Math.max(0, Math.min(RULES.maxScore, Math.round(patch.affinity)));
+  }
+  if (typeof patch.note === 'string') cur.note = patch.note.slice(0, 500);
+  if (typeof patch.muted === 'boolean') cur.muted = patch.muted;
+
+  cur.at = Date.now();
+  doc.overrides[qq] = cur;
   doc.updatedAt = Date.now();
-  await writeJson(MEMBERS_FILE, doc);
+  await writeJson(OVERRIDES_FILE, doc);
+  return cur;
 }
 
 /** 读 qq-bridge 配置，密钥脱敏后再给前端 */
@@ -160,6 +180,8 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, {
         bridgeDir: BRIDGE_DIR,
         bridgeConnected: !!BRIDGE_DIR,
+        membersFile: MEMBERS_FILE,
+        overridesFile: OVERRIDES_FILE,
         node: process.version,
         platform: `${process.platform} ${process.arch}`,
         rules: RULES,
@@ -172,21 +194,17 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (p === '/api/members' && req.method === 'GET') {
-      const doc = await loadMembers();
-      const enriched = doc.members.map((m) => ({
-        ...m,
-        level: levelOf(m.affinity),
-        next: nextLevelGap(m.affinity),
-      }));
+      const doc = loadAll();
       return json(res, 200, {
-        members: enriched,
+        members: doc.members,
         stats: summarize(doc.members),
-        updatedAt: doc.updatedAt ?? null,
+        updatedAt: doc.updatedAt,
+        membersFile: MEMBERS_FILE,
       });
     }
 
     if (p === '/api/proactive' && req.method === 'GET') {
-      const doc = await loadMembers();
+      const doc = loadAll();
       const ranked = proactiveCandidates(doc.members).slice(0, 10).map((x) => ({
         qq: x.member.qq,
         nick: x.member.nick,
@@ -197,21 +215,25 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, { candidates: ranked });
     }
 
-    // 编辑成员：只允许改 note / muted / affinity 三个字段
+    // 编辑成员：写 overrides.json，只接受 note / muted / affinity 三个字段
     if (p.startsWith('/api/members/') && (req.method === 'PATCH' || req.method === 'POST')) {
       const qq = decodeURIComponent(p.slice('/api/members/'.length));
       const body = await readBody(req);
-      const doc = await loadMembers();
-      const m = doc.members.find((x) => x.qq === qq);
-      if (!m) return json(res, 404, { error: '没有这个成员' });
 
-      if (typeof body.note === 'string') m.note = body.note.slice(0, 500);
-      if (typeof body.muted === 'boolean') m.muted = body.muted;
-      if (Number.isFinite(body.affinity)) {
-        m.affinity = Math.max(0, Math.min(RULES.maxScore, Math.round(body.affinity)));
+      const doc = loadAll();
+      if (!doc.members.some((x) => String(x.qq) === qq)) {
+        return json(res, 404, { error: '没有这个成员' });
       }
-      await saveMembers(doc);
-      return json(res, 200, { ok: true, member: m, level: levelOf(m.affinity) });
+
+      const patch = {};
+      if (typeof body.note === 'string') patch.note = body.note;
+      if (typeof body.muted === 'boolean') patch.muted = body.muted;
+      if (body.affinity === null) patch.affinity = null;
+      else if (Number.isFinite(body.affinity)) patch.affinity = body.affinity;
+
+      const saved = await saveOverride(qq, patch);
+      const after = loadAll().members.find((x) => String(x.qq) === qq);
+      return json(res, 200, { ok: true, member: after, override: saved, level: after?.level });
     }
 
     // ---- 静态资源 ----
@@ -226,5 +248,6 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, HOST, () => {
   console.log(`[webui] 控制台已启动：http://${HOST}:${PORT}`);
   console.log(`[webui] qq-bridge: ${BRIDGE_DIR || '未找到（只读演示模式）'}`);
-  console.log(`[webui] 成员数据: ${MEMBERS_FILE}`);
+  console.log(`[webui] 成员档案: ${MEMBERS_FILE}（bridge 写，本面板只读）`);
+  console.log(`[webui] 人工编辑: ${OVERRIDES_FILE}（本面板独占）`);
 });

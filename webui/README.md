@@ -73,7 +73,17 @@ node server.mjs --bridge "E:\QQ bot\qq-bridge" --port 5173
 
 ## 数据
 
-`data/members.json`，一个成员一条：
+**两个文件，各写各的，永不互相覆盖：**
+
+| 文件 | 谁写 | 内容 |
+|---|---|---|
+| `<bridge>/data/members.json` | **只有 bridge** | 计数器、亲密度、时间戳 |
+| `webui/data/overrides.json` | **只有面板** | 备注、静音、手动改的亲密度 |
+
+面板显示时把 overrides 盖在 members 上面。这样你在界面上写的备注，不会被 bridge 的下一轮计数冲掉；
+bridge 也不会因为你改了亲密度就把自己的计数器搞乱。
+
+members 里一个成员一条：
 
 ```jsonc
 {
@@ -85,8 +95,6 @@ node server.mjs --bridge "E:\QQ bot\qq-bridge" --port 5173
     "stickersSeen": 12,   // 收到过它的表情包几次（表情包功能用）
     "proactives": 1       // 主动搭过几次话（主动发起功能用）
   },
-  "note": "话最多的那个",   // 人工备注，不被自动逻辑覆盖
-  "muted": false,          // 不想让它主动找这个人
   "firstSeenAt": 1750000000000,
   "lastSeenAt": 1751000000000,
   "dayBucket": { "date": "2026-10-21", "scored": 4 },
@@ -94,22 +102,32 @@ node server.mjs --bridge "E:\QQ bot\qq-bridge" --port 5173
 }
 ```
 
-写入走「临时文件 + rename」，避免写一半断电把文件写坏。
+overrides 只存被改过的字段：
+
+```jsonc
+{ "version": 1, "overrides": { "2000000001": { "note": "话最多的那个", "muted": true, "affinity": 88 } } }
+```
+
+写入都走「临时文件 + rename」，避免写一半断电把文件写坏。
 
 ## API
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/api/status` | 连接状态、Node 版本、计分规则 |
+| GET | `/api/status` | 连接状态、两个数据文件的路径、计分规则 |
 | GET | `/api/config` | qq-bridge 配置，**密钥已脱敏** |
-| GET | `/api/members` | 成员列表 + 汇总统计 |
+| GET | `/api/members` | 成员列表 + 汇总统计（members 已合并 overrides） |
 | GET | `/api/proactive` | 主动搭话候选排序（附理由） |
-| PATCH | `/api/members/:qq` | 只允许改 `note` / `muted` / `affinity` |
+| PATCH | `/api/members/:qq` | 只写 overrides，字段限 `note` / `muted` / `affinity` |
 
-## 还没接上的那一环
+`affinity` 传 `null` 表示取消手动指定，回到自动算的值。
 
-**qq-bridge 目前还不会写这个文件。** 现在界面里的数据来自 `scripts/seed.mjs` 造的演示数据。
+## 演示数据
 
-要真正接上，需要在 qq-bridge 的 `src/router.mjs` 里，每收到一条群消息就调一次
-`recordMessage(member, { isAt, isSticker, at })`，然后定期 `writeJson` 落盘。
-这一步属于下一步工作，不在当前骨架范围内。
+```bash
+node scripts/seed.mjs          # 文件里已有真实档案时会拒绝执行
+node scripts/seed.mjs --force  # 确实要覆盖
+node scripts/seed.mjs --clear  # 清空（接上真实群之后用这个）
+```
+
+安全阀是有意的：`data/members.json` 到了线上就是真实群友档案，不该被一条命令误覆盖。
