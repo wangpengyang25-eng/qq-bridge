@@ -13,6 +13,11 @@ import fs from 'node:fs';
 
 /** 每个可调参数的校验规则：类型 + 合理范围。范围卡死了，面板上就不会调出离谱的数。 */
 export const SCHEMA = {
+  // 全局紧急开关
+  global: {
+    paused: { type: 'bool' }, // true = 完全闭嘴（不回答、不回图、不主动）
+    allowedGroups: { type: 'list' }, // 覆盖 config 的群白名单；空数组 = 所有群
+  },
   sticker: {
     enabled: { type: 'bool' },
     cooldownSec: { type: 'int', min: 0, max: 86400 },
@@ -21,6 +26,10 @@ export const SCHEMA = {
     withinSec: { type: 'int', min: 0, max: 86400 },
     replyWithText: { type: 'bool' },
     atUser: { type: 'bool' },
+    activeSet: { type: 'text' }, // 用哪一套表情（stickers/ 下的目录名）
+  },
+  persona: {
+    fewshot: { type: 'text' }, // 用哪一份示范（fewshot/ 下的文件名）；空 = 不启用
   },
   initiative: {
     enabled: { type: 'bool' },
@@ -53,6 +62,14 @@ export const SCHEMA = {
 
 function clamp(v, { type, min, max }) {
   if (type === 'bool') return typeof v === 'boolean' ? v : undefined;
+  if (type === 'text') {
+    if (typeof v !== 'string') return undefined;
+    return v.trim().slice(0, 200);
+  }
+  if (type === 'list') {
+    if (!Array.isArray(v)) return undefined;
+    return v.map((x) => String(x).trim()).filter(Boolean).slice(0, 200);
+  }
   const n = Number(v);
   if (!Number.isFinite(n)) return undefined;
   const i = Math.round(n);

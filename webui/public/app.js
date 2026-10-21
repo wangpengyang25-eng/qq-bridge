@@ -124,7 +124,7 @@ function renderSwitches() {
     return;
   }
 
-  box.innerHTML = Object.entries(GROUP_META)
+  const groupsHtml = Object.entries(GROUP_META)
     .map(([gkey, meta]) => {
       const fields = FIELD_META[gkey] || {};
       const rows = Object.entries(fields)
@@ -156,6 +156,15 @@ function renderSwitches() {
     })
     .join('');
 
+  const allowCell = groups.global?.allowedGroups;
+  const allowVal = Array.isArray(allowCell?.value) ? allowCell.value : (allowCell?.base || []);
+  const allowHtml = `<div class="set-group">
+    <div class="set-head"><b>群白名单</b><em>只在这些群工作；留空 = 所有群。填群号，逗号或换行分隔</em></div>
+    <textarea id="allowBox" rows="3" placeholder="123456789, 987654321">${esc((allowVal || []).join('\n'))}</textarea>
+    <div class="row"><button class="sm primary" id="saveAllow">保存白名单</button><span class="hint">${allowCell?.overridden ? '已被面板改过' : '当前来自 config.json'}</span></div>
+  </div>`;
+  box.innerHTML = groupsHtml + allowHtml;
+
   box.querySelectorAll('input[data-f]').forEach((el) => {
     el.addEventListener('change', () => saveField(el.dataset.g, el.dataset.f, el));
   });
@@ -165,6 +174,23 @@ function renderSwitches() {
       saveField(el.dataset.g, el.dataset.f, null);
     });
   });
+  const saveAllow = box.querySelector('#saveAllow');
+  if (saveAllow) {
+    saveAllow.addEventListener('click', async () => {
+      const list = ($('#allowBox').value || '')
+        .split(/[\s,，]+/)
+        .map((s) => s.trim())
+        .filter(Boolean);
+      try {
+        const r = await api('/api/control', { method: 'PATCH', body: JSON.stringify({ control: { global: { allowedGroups: list } } }) });
+        state.effective = { groups: r.groups };
+        renderSwitches();
+        await loadRuntime();
+      } catch (e) {
+        alert(`保存失败：${e.message}`);
+      }
+    });
+  }
 }
 
 async function saveField(group, field, el) {
@@ -403,6 +429,197 @@ async function patch(qq, body) {
   }
 }
 
+// ---------- 运行状态 ----------
+function fmtMs(ms) {
+  if (!ms || ms < 0) return '—';
+  if (ms < 60000) return `${Math.round(ms / 1000)} 秒前`;
+  if (ms < 3600000) return `${Math.round(ms / 60000)} 分钟前`;
+  return `${Math.round(ms / 3600000)} 小时前`;
+}
+
+function renderRuntime(data) {
+  const r = data?.runtime;
+  const age = data?.ageMs;
+  $('#runtimeAge').textContent = age == null ? 'bridge 还没上报过' : `上报于 ${fmtMs(age)}`;
+  if (!r) {
+    $('#runtime').innerHTML = '<p class="hint" style="padding:14px">还没有运行数据 —— bridge 起来后每 30 秒写一次。</p>';
+    return;
+  }
+  const t = r.stats?.tokens || {};
+  const st = r.stats || {};
+  const cacheRate = t.prompt ? Math.round(((t.cacheHit || 0) / t.prompt) * 100) : 0;
+  const ini = r.initiative || {};
+
+  const cell = (k, v, sub = '') =>
+    `<div class="rt-cell"><div class="k">${esc(k)}</div><div class="v">${esc(String(v))}${sub ? `<small>${esc(sub)}</small>` : ''}</div></div>`;
+
+  $('#runtime').innerHTML = `
+    <div class="rt-grid">
+      ${cell('模型', r.model || '—')}
+      ${cell('群友档案', r.members?.size ?? 0, ' 人')}
+      ${cell('今日主动', ini.today ?? 0, ` / ${ini.dailyLimit ?? '—'}`)}
+      ${cell('累计回答', st.answered ?? 0, ' 次')}
+      ${cell('回图', st.stickerReplies ?? 0, ' 次')}
+      ${cell('插话', st.chime ?? 0, ' 次')}
+      ${cell('限流拦截', st.limited ?? 0, ' 次')}
+      ${cell('出错', st.errors ?? 0, ' 次')}
+      ${cell('输入 token', t.prompt ?? 0)}
+      ${cell('前缀缓存命中', `${cacheRate}%`)}
+      ${cell('人设', (r.persona?.source || '—').split(/[\\/]/).pop())}
+      ${cell('示范', r.persona?.fewshot || '未启用')}
+    </div>
+    <div class="rt-foot">
+      <span>暂停：<b class="${r.paused ? 'on' : ''}">${r.paused ? '已暂停' : '运行中'}</b></span>
+      <span>白名单：<b>${r.allowedGroups?.length ? r.allowedGroups.join('、') : '所有群'}</b></span>
+      <span>表情套装：<b>${esc(r.stickerSet || '—')}</b></span>
+      ${r.lastInitiative ? `<span>上次主动：<b>${esc(r.lastInitiative.kind)}</b>（${esc(r.lastInitiative.reason || '')}）</span>` : ''}
+    </div>`;
+}
+
+async function loadRuntime() {
+  try {
+    renderRuntime(await api('/api/runtime'));
+  } catch { /* 忽略，下次再试 */ }
+}
+
+// ---------- 人设 ----------
+function renderPersona(d) {
+  $('#personaFile').textContent = d.file ? d.file.replace(/^.*[\\/]/, '') : '—';
+  const opts = ['<option value="">不启用示范</option>']
+    .concat(d.fewshot.map((f) => `<option value="${esc(f)}" ${d.activeFewshot === f ? 'selected' : ''}>${esc(f)}</option>`))
+    .join('');
+  $('#persona').innerHTML = `
+    <div class="persona-grid">
+      <label class="field">
+        <span>人设正文（保存后下一条消息生效，不用重启）</span>
+        <textarea id="personaText" class="persona-text" placeholder="她是怎样的一个人……">${esc(d.text)}</textarea>
+      </label>
+      <div class="persona-side">
+        <label class="field">
+          <span>示范问答（fewshot/）</span>
+          <select id="fewshotSelect">${opts}</select>
+        </label>
+        <div class="row">
+          <button class="primary" id="savePersona">保存人设</button>
+          <span class="hint" id="personaHint">${d.error ? esc(d.error) : ''}</span>
+        </div>
+      </div>
+    </div>`;
+
+  $('#savePersona').addEventListener('click', async () => {
+    const hint = $('#personaHint');
+    hint.textContent = '保存中…';
+    try {
+      const r = await api('/api/persona', { method: 'POST', body: JSON.stringify({ text: $('#personaText').value }) });
+      hint.textContent = `已保存 ${r.bytes} 字节（备份 ${r.backup}）`;
+    } catch (e) {
+      hint.textContent = `失败：${e.message}`;
+    }
+  });
+
+  $('#fewshotSelect').addEventListener('change', async (e) => {
+    try {
+      await api('/api/control', { method: 'PATCH', body: JSON.stringify({ control: { persona: { fewshot: e.target.value } } }) });
+      await loadControl();
+      await loadRuntime();
+    } catch (err) {
+      alert(`保存失败：${err.message}`);
+    }
+  });
+}
+
+async function loadPersona() {
+  try {
+    renderPersona(await api('/api/persona'));
+  } catch (e) {
+    $('#persona').innerHTML = `<p class="hint" style="padding:14px">读不到人设：${esc(e.message)}</p>`;
+  }
+}
+
+// ---------- 表情套装 ----------
+function renderSets(d) {
+  $('#setStatus').textContent = d.sets?.length ? `当前：${d.active}` : '没有可用套装';
+  if (!d.sets?.length) {
+    $('#sets').innerHTML = `<p class="hint" style="padding:14px">stickers/ 下没有找到任何套装目录。</p>`;
+    return;
+  }
+  $('#sets').innerHTML = d.sets
+    .map((s) => {
+      const on = s.name === d.active;
+      return `<div class="set-card ${on ? 'on' : ''}">
+        <div class="set-title">
+          <b>${esc(s.name)}</b>
+          <span class="hint">${s.count} 张</span>
+          ${on ? '<span class="tag">使用中</span>' : `<button class="sm" data-set="${esc(s.name)}">切换</button>`}
+        </div>
+        <div class="thumbs">
+          ${s.preview
+            .map(
+              (p) =>
+                `<figure title="${esc(p.mood)}"><img loading="lazy" src="/api/sticker?set=${encodeURIComponent(s.name)}&file=${encodeURIComponent(p.file)}" alt=""><figcaption>${esc(p.mood)}</figcaption></figure>`
+            )
+            .join('')}
+        </div>
+      </div>`;
+    })
+    .join('');
+
+  $('#sets').querySelectorAll('button[data-set]').forEach((el) => {
+    el.addEventListener('click', async () => {
+      try {
+        await api('/api/control', { method: 'PATCH', body: JSON.stringify({ control: { sticker: { activeSet: el.dataset.set } } }) });
+        await loadSets();
+        await loadRuntime();
+      } catch (e) {
+        alert(`切换失败：${e.message}`);
+      }
+    });
+  });
+}
+
+async function loadSets() {
+  try {
+    renderSets(await api('/api/sets'));
+  } catch (e) {
+    $('#sets').innerHTML = `<p class="hint" style="padding:14px">读不到套装：${esc(e.message)}</p>`;
+  }
+}
+
+// ---------- 日志 ----------
+async function loadLogs() {
+  const lines = $('#logLines').value;
+  const q = $('#logFilter').value.trim();
+  try {
+    const d = await api(`/api/logs?lines=${encodeURIComponent(lines)}&q=${encodeURIComponent(q)}`);
+    const box = $('#logBox');
+    const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 40;
+    box.textContent = (d.lines || []).join('\n') || '（没有匹配的日志）';
+    if (atBottom) box.scrollTop = box.scrollHeight;
+  } catch (e) {
+    $('#logBox').textContent = `读取日志失败：${e.message}`;
+  }
+}
+
+// ---------- 暂停 ----------
+async function togglePause() {
+  const paused = !(state.effective?.groups?.global?.paused?.value === true);
+  try {
+    const r = await api('/api/control', { method: 'PATCH', body: JSON.stringify({ control: { global: { paused } } }) });
+    state.effective = { groups: r.groups };
+    syncPauseBtn();
+    await loadRuntime();
+  } catch (e) {
+    alert(`操作失败：${e.message}`);
+  }
+}
+
+function syncPauseBtn() {
+  const paused = state.effective?.groups?.global?.paused?.value === true;
+  const btn = $('#pauseBtn');
+  btn.textContent = paused ? '已暂停 · 点此恢复' : '暂停';
+  btn.classList.toggle('paused', paused);
+}
+
 // ---------- 启动 ----------
 
 const SORT_LABEL = { affinity: '亲密度 ↓', recent: '最近活跃 ↓', messages: '发言数 ↓' };
@@ -448,10 +665,32 @@ async function loadControl() {
   try {
     renderStatus(await api('/api/status'));
     await loadControl();
+    syncPauseBtn();
     await loadMembers();
     await loadCandidates();
+    await loadRuntime();
+    await loadPersona();
+    await loadSets();
+    await loadLogs();
   } catch (e) {
     $('#status').className = 'status warn';
     $('#status').textContent = `加载失败：${e.message}`;
   }
+
+  // 定时刷新：运行状态和日志
+  let autoLog = true;
+  setInterval(() => {
+    loadRuntime();
+    if (autoLog && $('#logAuto').checked) loadLogs();
+  }, 5000);
+
+  $('#pauseBtn').addEventListener('click', togglePause);
+  $('#logReload').addEventListener('click', loadLogs);
+  $('#logFilter').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') loadLogs();
+  });
+  $('#logLines').addEventListener('change', loadLogs);
+  $('#logAuto').addEventListener('change', (e) => {
+    autoLog = e.target.checked;
+  });
 })();

@@ -19,6 +19,7 @@ import { createOverrideReader } from './overrides.mjs';
 import { createControlReader } from './control.mjs';
 import { StickerSense, decideStickerReply, pickReplyMood } from './stickersense.mjs';
 import { relationLine, levelOf } from './profile.mjs';
+import { PersonaLoader } from './persona.mjs';
 
 /** 接入开关 + 管理员绑定，落盘持久化，重启后保持上次状态 */
 export class StateStore {
@@ -158,6 +159,17 @@ export class Router {
           })
         : null;
 
+    // 人设与表情套装：面板上改了就在下一条消息前生效（内部有 mtime 缓存，不改时零开销）
+    this.persona = new PersonaLoader({
+      dir: cfg.__dir || '.',
+      promptFile: cfg.llm?.systemPromptFile || 'persona.txt',
+      fewshotDir: 'fewshot',
+      defaultFewshot: cfg.llm?.fewShotFile || '',
+    });
+    this._appliedPersona = '';
+    this._personaError = null;
+    this._activeSet = cfg.stickers?.activeSet || '';
+
     this.stats = {
       limited: 0,
       answered: 0,
@@ -293,6 +305,12 @@ export class Router {
 
     if (evt.text.startsWith('/')) return this.runCommand(evt, evt.text);
 
+    // 紧急暂停时仍然允许管理员指令，但普通问答和表情包回应都停
+    if (this.isPaused()) {
+      log('[router] 面板上处于暂停状态，忽略这条私聊问答');
+      return;
+    }
+
     // 只发了一张表情包：认出情绪后回一张（和群聊同一套门禁）
     if (evt.hasSticker && !evt.text) {
       const replied = await this.maybeStickerReply(evt);
@@ -330,7 +348,7 @@ export class Router {
 
   // ---------- 群聊：仅回答模式 + 总开关 + 群白名单 ----------
   async handleGroup(evt) {
-    const allow = this.cfg.bot.allowedGroups;
+    const allow = this.effAllowedGroups();
     const inScope = !allow.length || allow.includes(String(evt.sceneId));
     const answering = evt.isAtMe !== false || !this.cfg.mode.requireAt;
 
@@ -340,6 +358,9 @@ export class Router {
     if (inScope && this.members) this.members.record(evt);
     // 主动发起要根据"群刚才热不热闹"来判断，所以每条消息都要喂给引擎
     if (inScope) this.initiative.noteActivity(evt.sceneId, Date.now());
+
+    // 面板上的紧急暂停：不说话，但上面照常记录（数据不丢）
+    if (this.isPaused()) return;
 
     // 被动上下文：背景在**真要用时**才取（自足的问题带上纯属浪费 token），
     // 但记录是所有群消息都做的——记录只占内存，注入才花钱。
@@ -755,6 +776,47 @@ export class Router {
 
   // ---------- 面板设置（运行时可改，合并到配置之上）----------
 
+  /** 面板上的紧急暂停：一开就完全闭嘴（管理员指令除外） */
+  isPaused() {
+    return this.readControl().values.global?.paused === true;
+  }
+
+  /** 生效的群白名单：面板上设了就盖过 config.json */
+  effAllowedGroups() {
+    const ov = this.readControl().values.global?.allowedGroups;
+    if (Array.isArray(ov)) return ov.map(String);
+    return (this.cfg.bot?.allowedGroups || []).map(String);
+  }
+
+  /** 人设热重载：改了 persona.txt 或换了示范套，下一条消息就生效 */
+  applyPersona() {
+    const few = this.readControl().values.persona?.fewshot;
+    const r = this.persona.load({ overrideFewshot: few });
+    if (r.prompt && r.prompt !== this._appliedPersona) {
+      this.cfg.llm.systemPrompt = r.prompt;
+      this._appliedPersona = r.prompt;
+      log(`[persona] 人设已更新：${r.source || '(空)'}${r.fewshotName ? ` + 示范 ${r.fewshotName}` : ''}`);
+    }
+    if (r.error && r.error !== this._personaError) {
+      this._personaError = r.error;
+      log(`[persona] ${r.error}`);
+    }
+    return r;
+  }
+
+  /** 表情套装切换：面板上换了套装就重建索引 */
+  applyStickerSet() {
+    const want = this.readControl().values.sticker?.activeSet;
+    if (!want || want === this._activeSet) return;
+    try {
+      this.stickers = new StickerLibrary({ ...this.cfg.stickers, activeSet: want }, path.resolve(this.cfg.__dir || '.', this.cfg.stickers?.dir || 'stickers'));
+      this._activeSet = want;
+      log(`[sticker] 已切换到套装「${want}」（${this.stickers.moods().length} 个情绪）`);
+    } catch (e) {
+      log(`[sticker] 切换套装失败：${e.message}`);
+    }
+  }
+
   /** 表情包回应的生效配置：config.json 为底，面板设置覆盖 */
   effStickerReply() {
     const base = this.cfg.stickers?.reply || {};
@@ -972,6 +1034,7 @@ export class Router {
    */
   async runInitiative(now = Date.now()) {
     if (!this.state.enabled) return null; // 总开关断着就不主动开口
+    if (this.isPaused()) return null; // 面板上的紧急暂停
     // 面板上的开关和数值优先于 config.json（缺省表示跟随配置）
     this.applyInitiativeControl();
     const action = this.initiative.tick(now);
@@ -1033,11 +1096,43 @@ export class Router {
     return action;
   }
 
+  /** 给面板看的运行快照（由 bridge 定时写进 data/runtime.json） */
+  snapshot() {
+    const ctl = this.readControl().values;
+    const ov = this.readOverrides();
+    return {
+      at: Date.now(),
+      paused: !!ctl.global?.paused,
+      stateEnabled: this.state.enabled,
+      admins: this.state.boundAdmins || [],
+      allowedGroups: this.effAllowedGroups(),
+      model: this.cfg.llm?.model || '',
+      persona: {
+        source: this.cfg.__personaSource || '',
+        fewshot: this.cfg.__fewShotSource || '',
+        error: this._personaError,
+      },
+      stickerSet: this._activeSet || this.cfg.stickers?.activeSet || '',
+      stats: this.stats,
+      initiative: this.initiative.summary(),
+      lastInitiative: this.initiative.lastAction || null,
+      members: this.members
+        ? { size: this.members.size, file: this.members.file, stats: this.members.stats() }
+        : null,
+      stickerSense: this.stickerSense ? this.stickerSense.summary() : null,
+      overrides: { muted: ov.muted.size, notes: ov.notes.size, affinity: ov.affinity.size, bonds: ov.bonds.size },
+      busy: this.busy.size,
+    };
+  }
+
   // ---------- 调用模型并回复 ----------
   async answer({ evt, key, text, userName, sender, maxParts, lockKey, background = '', proactive = false, relation }) {
     if (lockKey) this.busy.add(lockKey);
     this.processing += 1;
     try {
+      // 每次回答前对一下人设和套装（有 mtime 缓存，没改就是几次 stat，很便宜）
+      this.applyPersona();
+      this.applyStickerSet();
       // 关系块：没显式传就按当前说话的人去查。
       // 所有回复（群聊、私聊、主动发起、表情包配文）都会自动带上，
       // 所以"对她说话的语气跟好感度挂钩"不需要在每个调用点重复写。

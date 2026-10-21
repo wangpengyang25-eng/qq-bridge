@@ -37,6 +37,23 @@ const BRIDGE_DIR = PATHS.bridgeDir;
 const MEMBERS_FILE = PATHS.membersFile;   // bridge 独占写入，面板只读
 const OVERRIDES_FILE = PATHS.overridesFile; // 面板独占写入
 const CONTROL_FILE = PATHS.controlFile;   // 面板独占写入（bridge 只读）
+const RUNTIME_FILE = PATHS.bridgeDir ? path.join(PATHS.bridgeDir, 'data', 'runtime.json') : null;
+
+/** 读 config.json 原文（不含对外输出，只在本层用来定位文件） */
+function readCfgRaw() {
+  if (!BRIDGE_DIR) return {};
+  try {
+    return JSON.parse(fs.readFileSync(path.join(BRIDGE_DIR, 'config.json'), 'utf8').replace(/^\uFEFF/, ''));
+  } catch {
+    return {};
+  }
+}
+
+const CFG_RAW = readCfgRaw();
+const LOG_FILE = path.join(BRIDGE_DIR || '', CFG_RAW.logFile || 'logs/bridge.log');
+const PERSONA_FILE = path.join(BRIDGE_DIR || '', CFG_RAW.llm?.systemPromptFile || 'persona.txt');
+const STICKERS_DIR = path.join(BRIDGE_DIR || '', CFG_RAW.stickers?.dir || 'stickers');
+const FEWSHOT_DIR = path.join(BRIDGE_DIR || '', 'fewshot');
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -310,6 +327,108 @@ const server = http.createServer(async (req, res) => {
       const body = await readBody(req);
       await saveControl(body?.control || body || {});
       return json(res, 200, { ok: true, ...effectiveSettings() });
+    }
+
+    if (p === '/api/runtime' && req.method === 'GET') {
+      const snap = readJson(RUNTIME_FILE || '', null);
+      return json(res, 200, {
+        runtime: snap,
+        hasBridge: !!BRIDGE_DIR,
+        ageMs: snap?.at ? Date.now() - snap.at : null,
+      });
+    }
+
+    if (p === '/api/logs' && req.method === 'GET') {
+      const lines = Math.min(1000, Math.max(20, Number(url.searchParams.get('lines')) || 200));
+      const q = (url.searchParams.get('q') || '').trim();
+      let text = '';
+      try {
+        text = fs.readFileSync(LOG_FILE, 'utf8');
+      } catch (e) {
+        return json(res, 200, { lines: [], error: `读不到日志：${e.message}` });
+      }
+      let arr = text.split('\n');
+      if (q) arr = arr.filter((l) => l.includes(q));
+      arr = arr.filter((l) => l.trim()).slice(-lines);
+      return json(res, 200, { lines: arr, file: LOG_FILE, total: arr.length });
+    }
+
+    if (p === '/api/persona' && req.method === 'GET') {
+      const ctl = loadControl();
+      let text = '';
+      let error = null;
+      try {
+        text = fs.readFileSync(PERSONA_FILE, 'utf8').replace(/^\uFEFF/, '');
+      } catch (e) {
+        error = e.message;
+      }
+      let fewshot = [];
+      try {
+        fewshot = fs.readdirSync(FEWSHOT_DIR).filter((f) => /\.(txt|md)$/i.test(f)).sort();
+      } catch { /* 目录不存在就算了 */ }
+      return json(res, 200, {
+        text,
+        error,
+        file: PERSONA_FILE,
+        fewshot,
+        activeFewshot: ctl.persona?.fewshot ?? (CFG_RAW.llm?.fewShotFile || ''),
+        overridden: ctl.persona?.fewshot !== undefined,
+      });
+    }
+
+    if (p === '/api/persona' && (req.method === 'POST' || req.method === 'PUT')) {
+      const body = await readBody(req, 512 * 1024);
+      if (typeof body.text !== 'string') return json(res, 400, { error: '缺少 text' });
+      try {
+        // 改之前留一份备份，人设写坏了能捞回来
+        const bak = `${PERSONA_FILE}.bak-${Date.now()}`;
+        if (fs.existsSync(PERSONA_FILE)) fs.copyFileSync(PERSONA_FILE, bak);
+        fs.writeFileSync(PERSONA_FILE, body.text, 'utf8');
+        return json(res, 200, { ok: true, bytes: Buffer.byteLength(body.text), backup: path.basename(bak) });
+      } catch (e) {
+        return json(res, 500, { error: `写入失败：${e.message}` });
+      }
+    }
+
+    if (p === '/api/sets' && req.method === 'GET') {
+      const ctl = loadControl();
+      const active = ctl.sticker?.activeSet ?? CFG_RAW.stickers?.activeSet ?? '';
+      const sets = [];
+      try {
+        for (const d of fs.readdirSync(STICKERS_DIR, { withFileTypes: true })) {
+          if (!d.isDirectory()) continue;
+          const dir = path.join(STICKERS_DIR, d.name);
+          const files = fs.readdirSync(dir).filter((f) => /\.(png|jpe?g|gif|webp)$/i.test(f));
+          if (!files.length) continue;
+          // 每个套装取前 12 个当预览
+          sets.push({
+            name: d.name,
+            count: files.length,
+            preview: files.slice(0, 12).map((f) => ({ file: f, mood: f.replace(/\.[^.]+$/, '') })),
+          });
+        }
+      } catch (e) {
+        return json(res, 200, { sets: [], active, error: e.message });
+      }
+      return json(res, 200, { sets, active });
+    }
+
+    // 表情图片：只允许读 STICKERS_DIR 里的文件
+    if (p === '/api/sticker' && req.method === 'GET') {
+      const setName = url.searchParams.get('set') || '';
+      const file = url.searchParams.get('file') || '';
+      const target = path.join(STICKERS_DIR, setName, path.basename(file));
+      if (!target.startsWith(STICKERS_DIR) || !fs.existsSync(target)) return json(res, 404, { error: '没有这张图' });
+      const buf = fs.readFileSync(target);
+      const mime = file.toLowerCase().endsWith('.gif')
+        ? 'image/gif'
+        : file.toLowerCase().endsWith('.webp')
+          ? 'image/webp'
+          : file.toLowerCase().endsWith('.png')
+            ? 'image/png'
+            : 'image/jpeg';
+      res.writeHead(200, { 'Content-Type': mime, 'Content-Length': buf.length, 'Cache-Control': 'max-age=300' });
+      return res.end(buf);
     }
 
     if (p === '/api/config') {

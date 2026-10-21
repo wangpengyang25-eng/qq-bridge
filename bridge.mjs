@@ -7,6 +7,7 @@ import { loadConfig, validateConfig } from './src/config.mjs';
 import { initLogger, log } from './src/logger.mjs';
 import { OneBot } from './src/onebot.mjs';
 import { Router, StateStore } from './src/router.mjs';
+import { RuntimeReporter } from './src/runtime.mjs';
 
 // 运行环境前置检查：src/onebot.mjs 用的是 Node 内置的全局 WebSocket，
 // 它从 Node 22 起才默认可用。更早的版本跑起来只会得到一句莫名其妙的
@@ -90,6 +91,14 @@ async function main() {
   }
   router.startInitiative();
 
+  // 定期把运行状态写出来，面板只读它
+  const reporter = new RuntimeReporter({
+    file: cfg.runtimeFile,
+    getSnapshot: () => router.snapshot(),
+  });
+  reporter.start();
+  process.on('exit', () => reporter.writeNow());
+
   await bot.start();
 
   const shutdown = (sig) => {
@@ -97,6 +106,7 @@ async function main() {
     bot.stop();
     try {
       router?.stopInitiative();
+      reporter?.stop();
     } catch { /* 忽略 */ }
     // 退出前把成员档案强制写一次，否则最后 flushMs 内的记录会丢
     try {

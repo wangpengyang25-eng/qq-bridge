@@ -1420,6 +1420,21 @@ async function main() {
       const bad = normalize({ sticker: { enabled: 'yes' } });
       check('设置：类型不对就丢弃（字符串不当布尔用）', bad.sticker === undefined, JSON.stringify(bad));
 
+      // 新类型：列表 / 文本
+      const typed = normalize({
+        global: { paused: true, allowedGroups: [' 111 ', '222', ''] },
+        sticker: { activeSet: '  04-线条狗 ' },
+        persona: { fewshot: 'A-萌系卖萌.txt' },
+      });
+      check('设置：紧急暂停读得到', typed.global?.paused === true);
+      check('设置：群白名单去空白、去空项', JSON.stringify(typed.global?.allowedGroups), JSON.stringify(typed.global?.allowedGroups));
+      check(
+        '设置：白名单清洗正确',
+        Array.isArray(typed.global.allowedGroups) && typed.global.allowedGroups.length === 2 && typed.global.allowedGroups[0] === '111',
+        JSON.stringify(typed.global.allowedGroups)
+      );
+      check('设置：文本字段去首尾空白', typed.sticker?.activeSet === '04-线条狗', typed.sticker?.activeSet);
+
       fs.writeFileSync(cf, '{ 坏掉的 JSON', 'utf8');
       check('设置：坏文件不抛错', typeof createControlReader(cf)().values === 'object');
     }

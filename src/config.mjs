@@ -198,6 +198,8 @@ export const DEFAULTS = {
   stateFile: 'state.json',
   // 面板写的运行时开关（主动发起 / 表情包回应）。缺省则跟随上面的配置。
   controlFile: 'data/control.json',
+  // bridge 定期写出的运行状态，供面板只读展示
+  runtimeFile: 'data/runtime.json',
 };
 
 function isPlainObject(v) {
@@ -241,6 +243,7 @@ export function loadConfig(file) {
   if (cfg.members?.file) cfg.members.file = path.resolve(dir, cfg.members.file);
   if (cfg.members?.overridesFile) cfg.members.overridesFile = path.resolve(dir, cfg.members.overridesFile);
   if (cfg.controlFile) cfg.controlFile = path.resolve(dir, cfg.controlFile);
+  if (cfg.runtimeFile) cfg.runtimeFile = path.resolve(dir, cfg.runtimeFile);
   if (cfg.stickers?.cacheFile) cfg.stickers.cacheFile = path.resolve(dir, cfg.stickers.cacheFile);
 
   // 人设：独立文件优先，便于随时改而不动代码

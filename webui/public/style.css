@@ -446,6 +446,52 @@ button.danger { color: var(--rose); }
   background: transparent;
 }
 
+/* ---------- 运行状态 ---------- */
+.runtime { padding: 12px 14px; }
+.rt-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px; }
+.rt-cell { background: var(--surface-2); border-radius: 9px; padding: 9px 11px; }
+.rt-cell .k { color: var(--dim-2); font-size: 11.5px; }
+.rt-cell .v { font-size: 16px; font-weight: 650; font-variant-numeric: tabular-nums; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rt-cell .v small { font-size: 11px; color: var(--dim-2); font-weight: 400; }
+.rt-foot { display: flex; flex-wrap: wrap; gap: 16px; margin-top: 10px; color: var(--dim-2); font-size: 12px; }
+.rt-foot b { color: var(--text); font-weight: 600; }
+.rt-foot b.on { color: var(--rose); }
+
+/* ---------- 人设 ---------- */
+.persona { padding: 12px 14px; }
+.persona-grid { display: grid; grid-template-columns: 1fr 260px; gap: 14px; align-items: start; }
+.persona .persona-text { min-height: 260px; font-size: 13px; line-height: 1.8; }
+.persona-side .row { margin-top: 8px; }
+#pauseBtn.paused { background: rgba(192, 74, 62, .12); border-color: var(--rose); color: var(--rose); font-weight: 600; }
+
+/* ---------- 表情套装 ---------- */
+.sets { padding: 12px; display: grid; gap: 10px; }
+.set-card { border: 1px solid var(--line-soft); border-radius: 10px; padding: 10px 12px; background: var(--surface-2); }
+.set-card.on { border-color: var(--accent-line); }
+.set-title { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+.set-title b { font-size: 13.5px; }
+.thumbs { display: flex; flex-wrap: wrap; gap: 8px; }
+.thumbs figure { margin: 0; width: 64px; text-align: center; }
+.thumbs img { width: 64px; height: 64px; object-fit: contain; border-radius: 8px; background: var(--sunken); display: block; }
+.thumbs figcaption { font-size: 10px; color: var(--dim-2); margin-top: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ---------- 日志 ---------- */
+.tools { display: flex; align-items: center; gap: 8px; }
+.tools input[type='search'] {
+  background: var(--sunken); color: var(--text);
+  border: 1px solid var(--line); border-radius: 8px;
+  padding: 4px 10px; font: inherit; font-size: 12px; width: 200px;
+}
+.tools select { width: auto; padding: 4px 8px; font-size: 12px; border-radius: 8px; }
+.inline-toggle { display: flex; align-items: center; gap: 5px; color: var(--dim-2); font-size: 12px; cursor: pointer; }
+.log-box {
+  margin: 0; padding: 12px 14px;
+  max-height: 340px; overflow: auto;
+  font: 12px/1.65 Consolas, "Cascadia Mono", monospace;
+  color: var(--dim); background: var(--sunken);
+  white-space: pre-wrap; word-break: break-all;
+}
+
 /* ---------- 候选 ---------- */
 
 select {

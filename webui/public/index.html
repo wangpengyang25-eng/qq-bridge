@@ -24,6 +24,7 @@
     </div>
   </div>
   <div class="top-actions">
+    <button class="sm danger" id="pauseBtn" title="立刻让她完全闭嘴">暂停</button>
     <button class="sm ghost" id="themeBtn" title="切换明暗">深色</button>
     <div class="status" id="status">连接中…</div>
   </div>
@@ -63,6 +64,47 @@
     <span class="hint">越熟、越久没聊、越少被打扰的越靠前</span>
   </div>
   <ol class="candidates" id="candidates"></ol>
+</section>
+
+<section class="card wide">
+  <div class="card-head">
+    <h2>运行状态</h2>
+    <span class="hint" id="runtimeAge">—</span>
+  </div>
+  <div class="runtime" id="runtime"></div>
+</section>
+
+<section class="card wide">
+  <div class="card-head">
+    <h2>人设</h2>
+    <span class="hint" id="personaFile">—</span>
+  </div>
+  <div class="persona" id="persona"></div>
+</section>
+
+<section class="card wide">
+  <div class="card-head">
+    <h2>表情套装</h2>
+    <span class="hint" id="setStatus">—</span>
+  </div>
+  <div class="sets" id="sets"></div>
+</section>
+
+<section class="card wide">
+  <div class="card-head">
+    <h2>日志</h2>
+    <div class="tools">
+      <input type="search" id="logFilter" placeholder="过滤关键词，如 sticker / 主动发起">
+      <select id="logLines">
+        <option value="100">100 行</option>
+        <option value="300" selected>300 行</option>
+        <option value="800">800 行</option>
+      </select>
+      <button class="sm" id="logReload">刷新</button>
+      <label class="inline-toggle"><input type="checkbox" id="logAuto" checked>自动</label>
+    </div>
+  </div>
+  <pre class="log-box" id="logBox">加载中…</pre>
 </section>
 
 <footer>
