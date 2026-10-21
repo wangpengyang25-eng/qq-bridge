@@ -294,6 +294,27 @@ async function postChat(url, llm, body) {
 }
 
 /**
+ * 一次性调用：**不写会话历史、不带工具**。
+ * 给"看一眼这张图是什么情绪"这类旁路任务用 —— 它不该污染聊天上下文，
+ * 也不该看到群聊人设。
+ */
+export async function complete(cfg, messages, opts = {}) {
+  const llm = cfg.llm;
+  const url = llm.baseUrl.replace(/\/+$/, '') + '/chat/completions';
+  const body = {
+    model: llm.model,
+    messages,
+    temperature: opts.temperature ?? 0.2,
+    max_tokens: opts.maxTokens ?? 64,
+    stream: false,
+  };
+  if (opts.jsonMode) body.response_format = { type: 'json_object' };
+
+  const data = await postChat(url, llm, body);
+  return data?.choices?.[0]?.message?.content ?? '';
+}
+
+/**
  * 调用模型，返回纯文本答案。
  * @param {object} opts
  *   opts.images      string[]  data:base64 形式的图片

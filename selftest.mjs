@@ -44,6 +44,7 @@ import {
 import { extractContent } from './src/onebot.mjs';
 import { MemberStore } from './src/members.mjs';
 import { InitiativeEngine } from './src/initiative.mjs';
+import { StickerSense, decideStickerReply } from './src/stickersense.mjs';
 import { loadConfig } from './src/config.mjs';
 import { parseBing } from './src/search.mjs';
 import { evaluateExpression } from './src/calc.mjs';
@@ -1138,6 +1139,120 @@ async function main() {
     const nextDay = T0 + 36 * 3600 * 1000;
     [0, 1000, 2000].forEach((d) => e10.noteActivity('g1', nextDay + d));
     check('闸门：日限按天重置', e10.tick(nextDay + 3000)?.kind === 'chime');
+  }
+
+  console.log('\n--- 20. 读群友的表情包 ---');
+  {
+    const T0 = 2000000000;
+    const rc = {
+      enabled: true,
+      onlyAfterBotSpoke: true,
+      withinMs: 120000,
+      cooldownMs: 300000,
+      dailyLimit: 2,
+    };
+    const day = '2026-10-21';
+    const now = new Date(`${day}T12:00:00`).getTime();
+
+    // ---- 门禁（纯函数）----
+    check('回图门禁：开关没开就不回', !decideStickerReply({ cfg: { enabled: false }, now }).ok);
+    check(
+      '回图门禁：机器人没在这个群说过话就不回',
+      !decideStickerReply({ cfg: rc, now, lastSpokeAt: 0 }).ok
+    );
+    check(
+      '回图门禁：刚说过话 → 放行',
+      decideStickerReply({ cfg: rc, now, lastSpokeAt: now - 10000 }).ok
+    );
+    check(
+      '回图门禁：说话太久了不起头',
+      !decideStickerReply({ cfg: rc, now, lastSpokeAt: now - 200000 }).ok
+    );
+    check(
+      '回图门禁：同群冷却中不回',
+      !decideStickerReply({ cfg: rc, now, lastSpokeAt: now - 1000, lastReplyAt: now - 60000 }).ok
+    );
+    check(
+      '回图门禁：今天额度用完不回',
+      !decideStickerReply({ cfg: rc, now, lastSpokeAt: now - 1000, day, dayCount: 2 }).ok
+    );
+    check(
+      '回图门禁：跨天额度重置',
+      decideStickerReply({ cfg: rc, now, lastSpokeAt: now - 1000, day: '2026-10-20', dayCount: 2 }).ok
+    );
+
+    // ---- 识别 + 缓存 ----
+    const moods = ['卖萌', '大笑', '难过'];
+    const cacheFile = path.join(TMP, 'sticker-cache.json');
+    fs.rmSync(cacheFile, { force: true });
+
+    let visionCalls = 0;
+    let answer = '{"mood":"卖萌"}';
+    const fakeFetch = async (urls) => ({ images: [{ dataUrl: `data:img/${urls[0]}` }] });
+    const fakeComplete = async () => {
+      visionCalls += 1;
+      return answer;
+    };
+    const mkSense = (over = {}) =>
+      new StickerSense({
+        cacheFile,
+        moods: () => over.moods || moods,
+        normalize: (w) => ((over.moods || moods).includes(w) ? w : null),
+        complete: fakeComplete,
+        fetchImages: fakeFetch,
+      });
+
+    const s1 = mkSense();
+    const r1 = await s1.identify(['sticker-a']);
+    check('识别：第一次走视觉', r1?.mood === '卖萌' && r1.source === 'vision', JSON.stringify(r1));
+    check('识别：只调了一次模型', visionCalls === 1, String(visionCalls));
+
+    const r2 = await s1.identify(['sticker-a']);
+    check('识别：同一张图第二次走缓存', r2?.mood === '卖萌' && r2.source === 'cache', JSON.stringify(r2));
+    check('识别：缓存命中不花钱', visionCalls === 1, String(visionCalls));
+
+    const s2 = mkSense();
+    const r3 = await s2.identify(['sticker-a']);
+    check('识别：换一个实例仍然命中缓存（已落盘）', r3?.source === 'cache' && s2.size === 1, JSON.stringify(r3));
+
+    // 模型返回词表外的情绪 → 丢弃，不缓存
+    answer = '{"mood":"愤怒"}';
+    const r4 = await s2.identify(['sticker-b']);
+    check('识别：词表外的情绪一律丢弃（不瞎猜）', r4 === null);
+    check('识别：丢弃的结果不进缓存', s2.size === 1, String(s2.size));
+
+    // 带废话的 JSON 也能抠出来
+    answer = '这张图：{"mood":"大笑"} 大致如此';
+    const r5 = await s2.identify(['sticker-c']);
+    check('识别：能从夹杂文字里抠出情绪', r5?.mood === '大笑', JSON.stringify(r5));
+
+    // 明确返回 null
+    answer = '{"mood":null}';
+    const r6 = await s2.identify(['sticker-d']);
+    check('识别：模型说不出来时返回 null', r6 === null);
+
+    // 下载失败
+    const s3 = new StickerSense({
+      cacheFile: path.join(TMP, 'sticker-cache2.json'),
+      moods: () => moods,
+      normalize: (w) => w,
+      complete: fakeComplete,
+      fetchImages: async () => {
+        throw new Error('下载超时');
+      },
+    });
+    check('识别：图片下载失败返回 null 而不是抛错', (await s3.identify(['x'])) === null);
+
+    // 词表变了：旧缓存失效，会重新识别
+    const s4 = mkSense({ moods: ['开心'] });
+    const before = visionCalls;
+    const r7 = await s4.identify(['sticker-c']);
+    check('识别：情绪名已不在词表时重新识别', visionCalls > before || r7 === null, JSON.stringify(r7));
+
+    // 默认值必须关着
+    const defCfg = loadConfig(path.join(TMP, 'not-exist-config.json'));
+    check('默认：读群友表情包关着（不会偷偷产生视觉调用）', defCfg.stickers.reply.enabled === false);
+    check('默认：识别缓存文件在 data/ 下', defCfg.stickers.cacheFile.includes('sticker-cache.json'));
   }
 
   const failed = results.filter((r) => !r.ok);

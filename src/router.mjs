@@ -8,7 +8,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { log } from './logger.mjs';
 import { markdownToPlain, splitMessage } from './text.mjs';
-import { chat, sessionKey, clearHistory, listSessions } from './llm.mjs';
+import { chat, complete, sessionKey, clearHistory, listSessions } from './llm.mjs';
 import { collectImages } from './vision.mjs';
 import { webSearch, formatResults } from './search.mjs';
 import { AmbientBuffer, needBackground } from './ambient.mjs';
@@ -16,6 +16,7 @@ import { StickerLibrary } from './stickers.mjs';
 import { MemberStore } from './members.mjs';
 import { InitiativeEngine } from './initiative.mjs';
 import { createOverrideReader } from './overrides.mjs';
+import { StickerSense, decideStickerReply } from './stickersense.mjs';
 
 /** 接入开关 + 管理员绑定，落盘持久化，重启后保持上次状态 */
 export class StateStore {
@@ -123,6 +124,29 @@ export class Router {
       isMuted: (qq) => this.readOverrides().muted.has(String(qq)),
     });
     this.initiativeTimer = null;
+
+    // 读群友的表情包：识别情绪 + 决定回不回。
+    // 只在 cfg.stickers.reply.enabled 时创建 —— 关着的时候连下载都不会发生。
+    this.lastSpokeAt = new Map(); // 每个群自己上次说话的时间（回图门禁用）
+    this.stickerReplyAt = new Map();
+    this.stickerReplyDay = { date: '', count: 0 };
+    this.stickerSense =
+      cfg.stickers?.reply?.enabled && cfg.stickers?.enabled !== false
+        ? new StickerSense({
+            cacheFile: cfg.stickers.cacheFile,
+            moods: () => this.stickers.moods(),
+            normalize: (w) => this.stickers.resolveMood(w),
+            complete: (messages, opts) => complete(cfg, messages, opts),
+            fetchImages: (urls, opts) =>
+              collectImages(urls, {
+                maxImages: 1,
+                maxBytes: cfg.vision?.maxBytes ?? 2097152,
+                timeoutMs: cfg.stickers.reply.visionTimeoutMs ?? 12000,
+                ...opts,
+              }),
+          })
+        : null;
+
     this.stats = {
       limited: 0,
       answered: 0,
@@ -131,6 +155,7 @@ export class Router {
       withBg: 0,
       bgSkipped: 0, // 因"这条不需要背景"而省下的注入次数
       stickers: 0,
+      stickerReplies: 0, // 读群友表情包后回图的次数
       chime: 0, // 主动插话次数（有消息时接一句）
       initiative: 0, // 主动发起次数（定时器驱动）
       tokens: { prompt: 0, completion: 0, cacheHit: 0, cacheMiss: 0, calls: 0 },
@@ -295,8 +320,11 @@ export class Router {
     }
 
     if (this.cfg.mode.requireAt && evt.isAtMe === false) {
-      // 仅回答模式：这条不回答，但顺手看看要不要主动接一句
-      await this.maybeChimeIn(evt, inScope);
+      // 仅回答模式：这条不回答。
+      // 但如果是表情包，先看看要不要回一张（比插话便宜，也更像群友）；
+      // 回了图就不再插话，避免同一张表情包触发两个动作。
+      const replied = await this.maybeStickerReply(evt);
+      if (!replied) await this.maybeChimeIn(evt, inScope);
       if (inScope && this.ambient.enabled) this.ambient.push(evt.sceneId, evt);
       return;
     }
@@ -313,7 +341,17 @@ export class Router {
       return;
     }
 
-    const body = evt.text || '(空消息)';
+    // 群友 @ 了机器人却只甩一张表情包（没写字）：先认出情绪，再交给模型。
+    // 否则模型只会收到一句"(空消息)"，完全不知道发生了什么。
+    let body = evt.text || '';
+    if (!body && this.stickerSense && evt.hasSticker) {
+      const felt = await this.stickerSense.identify(evt.stickerUrls);
+      if (felt) {
+        body = `（对方 @ 了你，没有说话，只发了一张表情包，看起来是「${felt.mood}」）`;
+        log(`[router] 表情包识别：${felt.mood}（${felt.source === 'cache' ? '缓存' : '视觉'}）`);
+      }
+    }
+    if (!body) body = '(空消息)';
     const key = sessionKey(evt, this.cfg.mode.groupShareContext);
     if (this.busy.has(key)) {
       log(`[router] 会话 ${key} 正在回答中，跳过本次`);
@@ -681,6 +719,59 @@ export class Router {
     }
   }
 
+  // ---------- 读群友的表情包，回一张 ----------
+  //
+  // 与"回答时顺手发表情"是两条路：那条由模型决定发不发、发哪个情绪；
+  // 这条是看到群友甩图之后，认出情绪再挑一张对着回。
+  // 回图不调对话模型，只可能有一次视觉识别调用（且结果会缓存）。
+  async maybeStickerReply(evt) {
+    const rc = this.cfg.stickers?.reply;
+    if (!rc?.enabled || !this.stickerSense) return null;
+    if (!evt?.hasSticker || !evt?.stickerUrls?.length) return null;
+    if (!this.state.enabled) return null;
+
+    const now = Date.now();
+    const sceneId = String(evt.sceneId);
+    const d = new Date(now);
+    const today = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+
+    const verdict = decideStickerReply({
+      cfg: rc,
+      now,
+      lastSpokeAt: this.lastSpokeAt.get(sceneId) || 0,
+      lastReplyAt: this.stickerReplyAt.get(sceneId) || 0,
+      day: this.stickerReplyDay.date,
+      dayCount: this.stickerReplyDay.count,
+    });
+    if (!verdict.ok) return null;
+
+    const felt = await this.stickerSense.identify(evt.stickerUrls);
+    if (!felt) {
+      log('[router] 表情包认不出来，这次不回（宁可不回，也不瞎发一张）');
+      return null;
+    }
+
+    const pick = this.stickers.pick(felt.mood);
+    if (!pick.ok) return null;
+
+    if (this.stickerReplyDay.date !== today) this.stickerReplyDay = { date: today, count: 0 };
+    this.stickerReplyDay.count += 1;
+    this.stickerReplyAt.set(sceneId, now);
+    this.stats.stickerReplies += 1;
+
+    log(`[router] 回了一张表情包：${felt.mood}（${felt.source === 'cache' ? '缓存命中' : '视觉识别'}）`);
+    try {
+      await this.bot.sendGroup(sceneId, {
+        image: pick.file,
+        replyToId: this.cfg.bot.replyWithQuote ? evt.messageId : undefined,
+      });
+    } catch (e) {
+      log(`[router] 表情包发送失败：${e.message}`);
+      return null;
+    }
+    return { mood: felt.mood, file: pick.file };
+  }
+
   // ---------- 主动发起谈话（定时器驱动）----------
   //
   // 和上面的 maybeChimeIn 的区别：那条是"有消息进来时"顺便判断要不要接一句；
@@ -869,7 +960,10 @@ export class Router {
       // 私聊里 evt 可能没有 userId（管理员自己），markReplied 会安全地返回 false。
       if (evt?.scene === 'group' && this.members) this.members.markReplied(evt.userId);
       // 自己说过话了：冷场接话的冷却按这个算
-      if (evt?.scene === 'group' && evt?.sceneId) this.initiative.noteSpoke(evt.sceneId);
+      if (evt?.scene === 'group' && evt?.sceneId) {
+        this.initiative.noteSpoke(evt.sceneId);
+        this.lastSpokeAt.set(String(evt.sceneId), Date.now()); // 回群友表情包的"接梗窗口"
+      }
     } catch (e) {
       this.stats.errors += 1;
       log(`[router] 回答失败：${e.message}`);

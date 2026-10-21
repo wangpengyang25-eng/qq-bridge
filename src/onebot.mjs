@@ -224,6 +224,7 @@ export class OneBot {
         images,
         hasSticker: stickers.length > 0,
         stickerCount: stickers.length,
+        stickerUrls: stickers.filter(Boolean), // 有 URL 的才给识别用
         messageId: msg.message_id,
         isAtMe: selfId ? ats.includes(selfId) : ats.length > 0,
         raw: msg,

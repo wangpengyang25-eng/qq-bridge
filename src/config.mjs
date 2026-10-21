@@ -131,6 +131,19 @@ export const DEFAULTS = {
     activeSet: '04-线条狗',  // 用哪一套（目录名）
     maxMoods: 60,            // 工具描述里最多列几个情绪名
     position: 'after',       // after = 先文字后表情；before = 先表情后文字
+
+    // ---- 读群友的表情包 ----
+    // 群友发表情包时，机器人默认只知道"有张图"，不知道是什么。开了这里才会去识别。
+    // 识别结果按图片哈希缓存（data/sticker-cache.json），同一张图只花一次钱。
+    reply: {
+      enabled: false,          // ★ 默认关：会产生视觉调用，也意味着主动回图
+      onlyAfterBotSpoke: true, // 只在"机器人刚说过话"之后接梗，不胡乱回所有人的图
+      withinMs: 120000,        // "刚说过话"的窗口
+      cooldownMs: 300000,      // 同一个群两次回图的最小间隔
+      dailyLimit: 20,          // 每天最多回几张
+      visionTimeoutMs: 12000,  // 识别超时就放弃（宁可这次不回）
+    },
+    cacheFile: 'data/sticker-cache.json', // 识别缓存（相对 config.json 所在目录）
   },
 
   // ---- 主动插话（不被 @ 时偶尔接一句，像群友那样）----
@@ -214,6 +227,7 @@ export function loadConfig(file) {
   cfg.stateFile = path.resolve(dir, cfg.stateFile);
   if (cfg.members?.file) cfg.members.file = path.resolve(dir, cfg.members.file);
   if (cfg.members?.overridesFile) cfg.members.overridesFile = path.resolve(dir, cfg.members.overridesFile);
+  if (cfg.stickers?.cacheFile) cfg.stickers.cacheFile = path.resolve(dir, cfg.stickers.cacheFile);
 
   // 人设：独立文件优先，便于随时改而不动代码
   cfg.__personaSource = 'config.json 的 llm.systemPrompt';
