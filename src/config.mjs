@@ -256,15 +256,18 @@ export function loadConfig(file) {
   if (cfg.stickers?.cacheFile) cfg.stickers.cacheFile = path.resolve(dir, cfg.stickers.cacheFile);
 
   // 人设：独立文件优先，便于随时改而不动代码
+  // 角色卡优先于根目录：llm.persona 指向 personas/<名字>/
   cfg.__personaSource = 'config.json 的 llm.systemPrompt';
+  const cardName = cfg.llm.persona;
+  const promptBase = cardName ? path.resolve(dir, 'personas', cardName) : dir;
   if (cfg.llm.systemPromptFile) {
-    const p = path.resolve(dir, cfg.llm.systemPromptFile);
+    const p = path.resolve(promptBase, cfg.llm.systemPromptFile);
     if (fs.existsSync(p)) {
       try {
         const text = fs.readFileSync(p, 'utf8').replace(/^\uFEFF/, '').trim();
         if (text) {
           cfg.llm.systemPrompt = text;
-          cfg.__personaSource = cfg.llm.systemPromptFile;
+          cfg.__personaSource = cardName ? `personas/${cardName}/${cfg.llm.systemPromptFile}` : cfg.llm.systemPromptFile;
         }
       } catch (e) {
         cfg.__personaError = `读取失败：${e.message}`;
@@ -272,6 +275,12 @@ export function loadConfig(file) {
     } else {
       cfg.__personaError = `找不到文件 ${p}`;
     }
+  }
+
+  // 角色卡自带的示范优先于全局 fewShotFile（换了角色不该沿用上一个的口吻）
+  if (cardName) {
+    const cardFewshot = path.resolve(promptBase, 'fewshot.txt');
+    if (fs.existsSync(cardFewshot)) cfg.llm.fewShotFile = cardFewshot;
   }
 
   // few-shot 示范：追加在人设之后（两份都生效，不需要二选一）

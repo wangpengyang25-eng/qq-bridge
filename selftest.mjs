@@ -1402,6 +1402,33 @@ async function main() {
       check('角色卡：卡里没有的称号被忽略', !relationLine(card, { table, affinity: 90, bond: '恋人' }).includes('恋人'));
     }
 
+    // ---- 角色卡目录：人设 + 自带示范 + 措辞表 ----
+    {
+      const { PersonaLoader } = await import('./src/persona.mjs');
+      const root = path.join(TMP, 'carddir');
+      const cardDir = path.join(root, 'personas', '测试角色');
+      fs.mkdirSync(cardDir, { recursive: true });
+      fs.writeFileSync(path.join(cardDir, 'persona.txt'), '我是测试角色。', 'utf8');
+      fs.writeFileSync(path.join(cardDir, 'fewshot.txt'), '问：在吗\n答：在。', 'utf8');
+      fs.writeFileSync(
+        path.join(cardDir, 'relations.json'),
+        JSON.stringify({ guides: { lv0: '测试用的冷淡措辞' }, bonds: { 测试称号: '这是测试称号' } }),
+        'utf8'
+      );
+
+      const loader = new PersonaLoader({ dir: root, promptFile: 'persona.txt', fewshotDir: 'fewshot', defaultFewshot: '' });
+      const r = loader.load({ persona: '测试角色' });
+      check('角色卡：能读到卡里的人设', r.prompt.includes('我是测试角色'), r.prompt);
+      check('角色卡：自带示范被合并进提示词', r.prompt.includes('问：在吗'), r.prompt);
+      check('角色卡：标记为自带示范', r.hasOwnFewshot === true);
+      check('角色卡：措辞表被解析出来', r.relations?.bonds?.测试称号 === '这是测试称号', JSON.stringify(r.relations));
+      check('角色卡：能列出可选角色', loader.listPersonas().includes('测试角色'), JSON.stringify(loader.listPersonas()));
+
+      // 面板显式指定示范时，压过卡里自带的
+      const r2 = loader.load({ persona: '测试角色', overrideFewshot: '' });
+      check('角色卡：显式指定不带示范时，卡内示范也不掺进来', !r2.prompt.includes('问：在吗'), r2.prompt);
+    }
+
     // 记事本 / PowerShell 保存 UTF-8 会加 BOM，JSON.parse 不认 —— 必须在读配置时剥掉
     {
       const bomFile = path.join(TMP, 'config-bom.json');

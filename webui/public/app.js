@@ -514,6 +514,16 @@ function renderPersona(d) {
     })
     .join('');
 
+  const fewshotField = d.hasOwnFewshot
+    ? `<label class="field">
+         <span>示范问答（fewshot/）</span>
+         <div class="hint" style="padding:8px 0">这张卡自带示范：<code>personas/${esc(d.activePersona)}/fewshot.txt</code>，跟着卡走，不用选</div>
+       </label>`
+    : `<label class="field">
+         <span>示范问答（fewshot/）</span>
+         <select id="fewshotSelect">${opts}</select>
+       </label>`;
+
   $('#persona').innerHTML = `
     <div class="persona-grid">
       <label class="field">
@@ -525,10 +535,7 @@ function renderPersona(d) {
           <span>角色卡</span>
           <select id="personaSelect">${personaOpts}</select>
         </label>
-        <label class="field">
-          <span>示范问答（fewshot/）</span>
-          <select id="fewshotSelect">${opts}</select>
-        </label>
+        ${fewshotField}
         <div class="row">
           <button class="primary" id="savePersona">保存人设</button>
           <span class="hint" id="personaHint">${d.error ? esc(d.error) : ''}</span>
@@ -559,7 +566,7 @@ function renderPersona(d) {
     }
   });
 
-  $('#fewshotSelect').addEventListener('change', async (e) => {
+  $('#fewshotSelect')?.addEventListener('change', async (e) => {
     try {
       await api('/api/control', { method: 'PATCH', body: JSON.stringify({ control: { persona: { fewshot: e.target.value } } }) });
       await loadControl();

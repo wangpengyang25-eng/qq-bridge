@@ -93,14 +93,25 @@ export class PersonaLoader {
    */
   load({ persona = '', overrideFewshot } = {}) {
     const now = Date.now();
-    if (now - this.at < CACHE_MS) return this.result;
+    // 缓存键必须包含"选了哪张卡/哪个示范"，否则面板上切了角色要等 2 秒才生效
+    const key = `${persona || ''}|${overrideFewshot === undefined ? '\u0000' : overrideFewshot}`;
+    if (now - this.at < CACHE_MS && key === this.lastKey) return this.result;
+    this.lastKey = key;
 
     const fewshotName = overrideFewshot === undefined ? this.defaultFewshot : String(overrideFewshot || '');
     const useCard = persona && persona !== '默认';
     const baseDir = useCard ? path.join(this.personaDir, persona) : this.dir;
     const pPath = this.promptFile ? path.resolve(baseDir, this.promptFile) : '';
     const rPath = useCard ? path.join(baseDir, 'relations.json') : '';
-    const fPath = fewshotName ? path.resolve(this.fewshotDir, fewshotName) : '';
+    // 角色卡自带的示范问答优先于配置里的全局示范：
+    // 换了角色还沿用上一个角色的示范，口吻会被带偏
+    const cardFewshot = useCard ? path.join(baseDir, 'fewshot.txt') : '';
+    const hasCardFewshot = cardFewshot && fs.existsSync(cardFewshot) && overrideFewshot === undefined;
+    const fPath = hasCardFewshot
+      ? cardFewshot
+      : fewshotName
+        ? path.resolve(this.fewshotDir, fewshotName)
+        : '';
 
     const sig = [persona || '默认', pPath, rPath, fPath]
       .map((p) => {
@@ -165,7 +176,8 @@ export class PersonaLoader {
       basePrompt: prompt,
       persona: useCard ? persona : '默认',
       relations,
-      fewshotName: fewshotText ? fewshotName : '',
+      fewshotName: fewshotText ? (hasCardFewshot ? '（角色卡自带）' : fewshotName) : '',
+      hasOwnFewshot: !!hasCardFewshot,
       source,
       error,
       changed: true,

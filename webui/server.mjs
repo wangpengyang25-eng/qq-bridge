@@ -437,6 +437,10 @@ const server = http.createServer(async (req, res) => {
       try {
         fewshot = fs.readdirSync(FEWSHOT_DIR).filter((f) => /\.(txt|md)$/i.test(f)).sort();
       } catch { /* 目录不存在就算了 */ }
+      // 角色卡自带示范时，全局下拉就不该再起作用（换了角色口吻会被带偏）
+      const active = activePersona();
+      const ownFewshot =
+        !!active && active !== '默认' && fs.existsSync(path.join(PERSONAS_DIR, active, 'fewshot.txt'));
       return json(res, 200, {
         text,
         error,
@@ -445,9 +449,10 @@ const server = http.createServer(async (req, res) => {
         activeFewshot: ctl.persona?.fewshot ?? (CFG_RAW.llm?.fewShotFile || ''),
         overridden: ctl.persona?.fewshot !== undefined,
         personas: listPersonas(),
-        activePersona: activePersona() || '默认',
+        activePersona: active || '默认',
         personaOverridden: ctl.persona?.file !== undefined,
-        relations: personaRelations(activePersona()),
+        hasOwnFewshot: ownFewshot,
+        relations: personaRelations(active),
       });
     }
 
