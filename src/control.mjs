@@ -34,6 +34,10 @@ export const SCHEMA = {
   output: {
     maxParts: { type: 'int', min: 1, max: 5 }, // 一次最多分几条消息发出去
   },
+  chat: {
+    followUp: { type: 'bool' }, // 一个人在跟她聊时，不用每句都 @
+    followUpWindowSec: { type: 'int', min: 0, max: 3600 },
+  },
   initiative: {
     enabled: { type: 'bool' },
     dailyLimit: { type: 'int', min: 0, max: 100 },

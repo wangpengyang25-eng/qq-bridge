@@ -30,6 +30,12 @@ export const DEFAULTS = {
     enabledOnStart: true,   // 启动时是否默认「接入」。false 则等管理员发 /on
     requireAt: true,        // 仅回答模式：群里必须 @ 机器人才响应
     groupShareContext: true,// 同群共享一段对话上下文
+    // 连续对话：一个人跟她聊起来之后，短时间内不 @ 也能接着说。
+    // 只要有人插话就立刻结束 —— 不然"谁说话都当在问自己"。
+    followUp: {
+      enabled: true,
+      windowMs: 180000,     // 上一次回答后多久内还算"接着聊"
+    },
   },
 
   // ---- 模型 API（OpenAI 兼容） ----

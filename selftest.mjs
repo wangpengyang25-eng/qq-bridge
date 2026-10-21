@@ -272,7 +272,14 @@ function mkCfg(apiPort, wsPort, over = {}) {
     transport: 'onebot',
     onebot: { wsUrl: `ws://127.0.0.1:${wsPort}`, reconnectBaseMs: 300, reconnectMaxMs: 2000 },
     bot: { admins: [], allowedGroups: [], replyWithQuote: true },
-    mode: { enabledOnStart: true, requireAt: true, groupShareContext: true },
+    // 连续对话默认关掉：主流程那几十条断言都建立在"没 @ 就不出声"上，
+    // 这个特性单独用一个 bridge 实例验证（见后面"连续对话"那一节）
+    mode: {
+      enabledOnStart: true,
+      requireAt: true,
+      groupShareContext: true,
+      followUp: { enabled: false, windowMs: 180000 },
+    },
     limits: { enabled: false }, // 功能用例里关限流，限流单独验证
     llm: {
       systemPromptFile: '', // 测试目录没有 persona.txt，关掉文件加载
@@ -1454,6 +1461,38 @@ async function main() {
       fs.writeFileSync(cf, '{ 坏掉的 JSON', 'utf8');
       check('设置：坏文件不抛错', typeof createControlReader(cf)().values === 'object');
     }
+  }
+
+  console.log('\n--- 22. 连续对话（不 @ 也能接着说）---');
+  {
+    const { FollowTracker } = await import('./src/followup.mjs');
+    const T0 = 3000000000;
+    const f = new FollowTracker({ enabled: true, windowMs: 60000 });
+
+    check('连续：还没回过话时不算', f.isFollowing('g1', 'u1', T0) === false);
+
+    f.mark('g1', 'u1', T0);
+    check('连续：刚回过的本人接着说不需 @', f.isFollowing('g1', 'u1', T0 + 1000) === true);
+    check('连续：别人不享受这个待遇', f.isFollowing('g1', 'u2', T0 + 1000) === false);
+    check('连续：别的群不受影响', f.isFollowing('g2', 'u1', T0 + 1000) === false);
+    check('连续：过了窗口就不算', f.isFollowing('g1', 'u1', T0 + 61000) === false);
+
+    // 有人插话 → 立即结束
+    const f2 = new FollowTracker({ enabled: true, windowMs: 60000 });
+    f2.mark('g1', 'u1', T0);
+    check('连续：本人再说话不会打断自己', f2.noteSpeaker('g1', 'u1') === false && f2.isFollowing('g1', 'u1', T0 + 1000));
+    const broke = f2.noteSpeaker('g1', 'u2');
+    check('连续：别人插话会打断', broke === true && f2.isFollowing('g1', 'u1', T0 + 2000) === false);
+
+    // 关掉就完全不生效
+    const off = new FollowTracker({ enabled: false, windowMs: 60000 });
+    off.mark('g1', 'u1', T0);
+    check('连续：关掉后即使刚回过也不放行', off.isFollowing('g1', 'u1', T0 + 1000) === false);
+
+    // 窗口 0 = 等价于关闭
+    const zero = new FollowTracker({ enabled: true, windowMs: 0 });
+    zero.mark('g1', 'u1', T0);
+    check('连续：窗口为 0 时不放行', zero.isFollowing('g1', 'u1', T0) === false);
   }
 
   const failed = results.filter((r) => !r.ok);

@@ -70,6 +70,7 @@ function renderStatus(s) {
 // 功能开关：改动立刻写 data/control.json，bridge 3 秒内读到
 // 运行时设置：分组 → 字段 → 【中文标签, 单位】
 const GROUP_META = {
+  chat: { title: '对话方式', desc: '群里什么时候需要 @ 她' },
   output: { title: '输出长度', desc: '她一次最多分几条消息发出去（默认一条）' },
   sticker: { title: 'A · 群友发表情包时回应', desc: '认出情绪、回一张不同情绪的图' },
   interject: { title: 'C · 听到就插话', desc: '有人提到她的名字、或有人发图时，顺口接一句' },
@@ -79,6 +80,10 @@ const GROUP_META = {
 };
 
 const FIELD_META = {
+  chat: {
+    followUp: ['连续对话：一个人在跟她聊时不用每句都 @', 'bool'],
+    followUpWindowSec: ['"接着聊"的时间窗口', '秒'],
+  },
   output: {
     maxParts: ['一次最多分几条', '条'],
   },

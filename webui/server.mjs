@@ -177,6 +177,10 @@ function readRawSettings() {
       output: {
         maxParts: cfg.output?.maxPartsGroup ?? 2,
       },
+      chat: {
+        followUp: cfg.mode?.followUp?.enabled !== false,
+        followUpWindowSec: Math.round((cfg.mode?.followUp?.windowMs ?? 180000) / 1000),
+      },
     };
   } catch {
     return null;

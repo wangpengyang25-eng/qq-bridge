@@ -20,6 +20,7 @@ import { createControlReader } from './control.mjs';
 import { StickerSense, decideStickerReply, pickReplyMood } from './stickersense.mjs';
 import { relationLine, levelOf } from './profile.mjs';
 import { PersonaLoader } from './persona.mjs';
+import { FollowTracker } from './followup.mjs';
 
 /** 接入开关 + 管理员绑定，落盘持久化，重启后保持上次状态 */
 export class StateStore {
@@ -169,6 +170,12 @@ export class Router {
     this._appliedPersona = '';
     this._personaError = null;
     this._activeSet = cfg.stickers?.activeSet || '';
+
+    // 连续对话：一个人在跟她聊时，短时间内不 @ 也能接着说
+    this.follow = new FollowTracker({
+      enabled: cfg.mode?.followUp?.enabled !== false,
+      windowMs: cfg.mode?.followUp?.windowMs ?? 180000,
+    });
 
     this.stats = {
       limited: 0,
@@ -350,7 +357,21 @@ export class Router {
   async handleGroup(evt) {
     const allow = this.effAllowedGroups();
     const inScope = !allow.length || allow.includes(String(evt.sceneId));
-    const answering = evt.isAtMe !== false || !this.cfg.mode.requireAt;
+
+    // 连续对话：先记下"谁在说话"。别人插话会立刻打断（这是防误答的关键）
+    let following = false;
+    if (inScope) {
+      this.applyFollowControl();
+      if (this.follow.noteSpeaker(evt.sceneId, evt.userId)) {
+        log(`[router] 群 ${evt.sceneId} 有人插话，连续对话结束`);
+      }
+      following = this.follow.isFollowing(evt.sceneId, evt.userId);
+      if (following && evt.isAtMe === false) {
+        log(`[router] 连续对话中：${evt.userName || evt.userId} 没 @ 也算在问她`);
+      }
+    }
+
+    const answering = evt.isAtMe !== false || !this.cfg.mode.requireAt || following;
 
     // 成员档案：白名单内的群，**所有**消息都记（不只是被 @ 的）。
     // 放在最前面，这样即使下面因为开关/限流/白名单直接 return，记录也不会漏。
@@ -374,7 +395,7 @@ export class Router {
       }
     }
 
-    if (this.cfg.mode.requireAt && evt.isAtMe === false) {
+    if (this.cfg.mode.requireAt && evt.isAtMe === false && !following) {
       // 仅回答模式：这条不回答。
       // 但如果是表情包，先看看要不要回一张（比插话便宜，也更像群友）；
       // 回了图就不再插话，避免同一张表情包触发两个动作。
@@ -775,6 +796,15 @@ export class Router {
   }
 
   // ---------- 面板设置（运行时可改，合并到配置之上）----------
+
+  /** 面板上的"连续对话"开关与窗口 */
+  applyFollowControl() {
+    const c = this.readControl().values.chat || {};
+    this.follow.setConfig({
+      enabled: c.followUp,
+      windowMs: c.followUpWindowSec === undefined ? undefined : c.followUpWindowSec * 1000,
+    });
+  }
 
   /** 面板上的紧急暂停：一开就完全闭嘴（管理员指令除外） */
   isPaused() {
@@ -1254,6 +1284,8 @@ export class Router {
         if (evt.scene === 'group') this.initiative.noteSpoke(evt.sceneId);
         // 回群友表情包的"接梗窗口"：群聊和私聊分开记
         this.lastSpokeAt.set(`${evt.scene}:${evt.sceneId}`, Date.now());
+        // 连续对话：从现在起这个人在这个群不用 @ 也能接着说
+        if (evt.scene === 'group' && evt.userId) this.follow.mark(evt.sceneId, evt.userId);
       }
     } catch (e) {
       this.stats.errors += 1;
