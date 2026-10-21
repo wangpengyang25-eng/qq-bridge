@@ -1355,6 +1355,22 @@ async function main() {
     check('关系：备注会被带上', relationLine(m).includes('他要考试了'));
     check('关系：没有成员时返回空串', relationLine(null) === '');
 
+    // 不熟的时候要压住人设里的温柔：低档位带"保持距离"的优先级提示
+    const cold = createMember('1002', '路人', Date.now());
+    cold.affinity = 3;
+    const coldLine = relationLine(cold);
+    check('关系：陌生档写着保持距离', coldLine.includes('保持距离'), coldLine);
+    check('关系：陌生档带有优先级压制说明', coldLine.includes('优先于人设'), coldLine);
+
+    const warm = createMember('1003', '熟人', Date.now());
+    warm.affinity = 60;
+    const warmLine = relationLine(warm);
+    check('关系：熟络以上不再出现距离感提示', !warmLine.includes('优先于人设'), warmLine);
+
+    const mid = createMember('1004', '半熟', Date.now());
+    mid.affinity = 35; // 熟络
+    check('关系：熟络档允许开玩笑', relationLine(mid).includes('开玩笑'), relationLine(mid));
+
     // 记事本 / PowerShell 保存 UTF-8 会加 BOM，JSON.parse 不认 —— 必须在读配置时剥掉
     {
       const bomFile = path.join(TMP, 'config-bom.json');

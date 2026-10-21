@@ -167,12 +167,15 @@ export function decayAll(members, now = Date.now()) {
 
 /** 各等级下"该怎么说话"的一句话指引 */
 export const LEVEL_GUIDE = {
-  lv0: '还不太熟，客气一点，别自作熟络',
-  lv1: '见过几次，可以随意些，但别太主动',
-  lv2: '比较熟了，可以开玩笑、可以接梗',
-  lv3: '很熟，说话可以没大没小、可以互损',
-  lv4: '关系很近，可以撒娇、可以互怼、也可以主动关心',
+  lv0: '刚认识，还很生分 —— 客气、简短、保持距离：不主动搭话、不撒娇、不套近乎，对方问什么答什么，一两句就够',
+  lv1: '见过几面但还不熟 —— 语气平和、有分寸：可以接话但不必热络，别开玩笑，别用亲昵的称呼',
+  lv2: '比较熟了 —— 可以开玩笑、可以接梗，语气自然些',
+  lv3: '很熟 —— 说话可以没大没小、可以互损，不用客气',
+  lv4: '关系很近 —— 可以撒娇、可以互怼、也可以主动关心',
 };
+
+/** 低好感时要把人设里的热络压下去，没有这句她照样一脸温柔 */
+const COLD_HINT = '（这条优先于人设里的热络倾向：还不熟就该有距离感，别热情过头）';
 
 /**
  * 满级之后的具体关系称号。分数只到"挚友"，再往上是什么关系由人自己定，
@@ -205,7 +208,10 @@ export function relationLine(m, over = {}) {
   if (!m && !hasManual) return '';
 
   const level = levelOf(eff);
-  const lines = [`【你和他现在的关系】${level.name}（亲密度 ${Math.round(eff)}/100）—— ${LEVEL_GUIDE[level.key]}`];
+  const cold = level.key === 'lv0' || level.key === 'lv1';
+  const lines = [
+    `【你和他现在的关系】${level.name}（亲密度 ${Math.round(eff)}/100）—— ${LEVEL_GUIDE[level.key]}${cold ? COLD_HINT : ''}`,
+  ];
 
   const bond = over.bond;
   if (bond && BONDS[bond]) lines.push(`【你们的关系】${BONDS[bond]}`);
