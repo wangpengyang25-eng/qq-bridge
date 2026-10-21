@@ -579,7 +579,24 @@ function renderPersona(d) {
 
 async function loadPersona() {
   try {
-    renderPersona(await api('/api/persona'));
+    const d = await api('/api/persona');
+    // 关系称号是跟着角色卡走的：换卡之后这里不更新，
+    // 成员详情里就会还挂着上一个角色的称号（比如黑眼卡上却显示"闺蜜"）
+    const bonds = d.relations?.bonds;
+    if (Array.isArray(bonds) && bonds.length) state.bonds = bonds;
+    else if (!bonds && state.bonds?.length) state.bonds = []; // 卡里没写就回退到默认列表
+    renderPersona(d);
+
+    // 重画当前选中的成员，让称号下拉立刻换成新的一套
+    if (!bonds && !state.bonds.length) {
+      try {
+        state.bonds = (await api('/api/status')).bonds || [];
+      } catch { /* 忽略 */ }
+    }
+    if (state.selected) {
+      const m = state.members.find((x) => x.qq === state.selected);
+      if (m) renderDetail(m);
+    }
   } catch (e) {
     $('#persona').innerHTML = `<p class="hint" style="padding:14px">读不到人设：${esc(e.message)}</p>`;
   }
