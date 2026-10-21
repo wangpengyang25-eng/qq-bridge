@@ -31,6 +31,9 @@ export const SCHEMA = {
   persona: {
     fewshot: { type: 'text' }, // 用哪一份示范（fewshot/ 下的文件名）；空 = 不启用
   },
+  output: {
+    maxParts: { type: 'int', min: 1, max: 5 }, // 一次最多分几条消息发出去
+  },
   initiative: {
     enabled: { type: 'bool' },
     dailyLimit: { type: 'int', min: 0, max: 100 },

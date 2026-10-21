@@ -174,6 +174,9 @@ function readRawSettings() {
         cooldownSec: Math.round((p.minIntervalMs ?? 600000) / 1000),
         dailyLimit: p.dailyLimit,
       },
+      output: {
+        maxParts: cfg.output?.maxPartsGroup ?? 2,
+      },
     };
   } catch {
     return null;

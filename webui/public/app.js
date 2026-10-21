@@ -70,6 +70,7 @@ function renderStatus(s) {
 // 功能开关：改动立刻写 data/control.json，bridge 3 秒内读到
 // 运行时设置：分组 → 字段 → 【中文标签, 单位】
 const GROUP_META = {
+  output: { title: '输出长度', desc: '她一次最多分几条消息发出去（默认一条）' },
   sticker: { title: 'A · 群友发表情包时回应', desc: '认出情绪、回一张不同情绪的图' },
   interject: { title: 'C · 听到就插话', desc: '有人提到她的名字、或有人发图时，顺口接一句' },
   initiative: { title: 'B · 主动发起（总开关与额度）', desc: '没人说话时也会自己开口' },
@@ -78,6 +79,9 @@ const GROUP_META = {
 };
 
 const FIELD_META = {
+  output: {
+    maxParts: ['一次最多分几条', '条'],
+  },
   sticker: {
     enabled: ['启用', 'bool'],
     cooldownSec: ['同一个群两次的最小间隔', '秒'],

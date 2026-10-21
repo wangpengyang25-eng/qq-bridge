@@ -188,10 +188,12 @@ export const DEFAULTS = {
   },
 
   // ---- 输出 ----
+  // 群聊回复默认只发一条：分多条很吵，只有真有一肚子话时才值得连发。
+  // 每段会被拆成单独的消息，所以这个数字直接决定"她一次说几条"。
   output: {
     maxCharsPerMessage: 900,
-    maxPartsGroup: 5,     // 群聊回复最多分几条（防刷屏的长文截断上限）
-    maxPartsPrivate: 4,
+    maxPartsGroup: 2,     // 群聊最多分几条（默认 2，够一次补充说明；再多就刷屏）
+    maxPartsPrivate: 2,
   },
 
   logFile: 'logs/bridge.log',

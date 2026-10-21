@@ -1130,6 +1130,13 @@ export class Router {
     if (lockKey) this.busy.add(lockKey);
     this.processing += 1;
     try {
+      // 面板上的"一次最多几条"是硬上限，压过各调用点传进来的值
+      const capParts = this.readControl().values.output?.maxParts;
+      if (Number.isFinite(capParts) && Number.isFinite(maxParts)) {
+        maxParts = Math.min(maxParts, capParts);
+      } else if (Number.isFinite(capParts)) {
+        maxParts = capParts;
+      }
       // 每次回答前对一下人设和套装（有 mtime 缓存，没改就是几次 stat，很便宜）
       this.applyPersona();
       this.applyStickerSet();
