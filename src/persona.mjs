@@ -103,6 +103,9 @@ export class PersonaLoader {
     const baseDir = useCard ? path.join(this.personaDir, persona) : this.dir;
     const pPath = this.promptFile ? path.resolve(baseDir, this.promptFile) : '';
     const rPath = useCard ? path.join(baseDir, 'relations.json') : '';
+    // 世界观（她"知道的事"）单独一个文件：补设定不用动人设本身
+    const lorePath = useCard ? path.join(baseDir, 'lore.txt') : '';
+    const hasLore = !!lorePath && fs.existsSync(lorePath);
     // 角色卡自带的示范问答优先于配置里的全局示范：
     // 换了角色还沿用上一个角色的示范，口吻会被带偏
     const cardFewshot = useCard ? path.join(baseDir, 'fewshot.txt') : '';
@@ -113,7 +116,7 @@ export class PersonaLoader {
         ? path.resolve(this.fewshotDir, fewshotName)
         : '';
 
-    const sig = [persona || '默认', pPath, rPath, fPath]
+    const sig = [persona || '默认', pPath, rPath, fPath, hasLore ? lorePath : '']
       .map((p) => {
         if (!p) return '-';
         try {
@@ -158,6 +161,15 @@ export class PersonaLoader {
       }
     }
 
+    let loreText = '';
+    if (hasLore) {
+      try {
+        loreText = fs.readFileSync(lorePath, 'utf8').replace(/^\uFEFF/, '').trim();
+      } catch (e) {
+        error = `lore.txt 读取失败：${e.message}`;
+      }
+    }
+
     let fewshotText = '';
     if (fPath) {
       try {
@@ -167,7 +179,7 @@ export class PersonaLoader {
       }
     }
 
-    const full = fewshotText ? `${prompt}\n\n${fewshotText}` : prompt;
+    const full = [prompt, loreText, fewshotText].filter(Boolean).join('\n\n');
 
     this.at = now;
     this.sig = sig;
@@ -178,6 +190,7 @@ export class PersonaLoader {
       relations,
       fewshotName: fewshotText ? (hasCardFewshot ? '（角色卡自带）' : fewshotName) : '',
       hasOwnFewshot: !!hasCardFewshot,
+      hasLore,
       source,
       error,
       changed: true,

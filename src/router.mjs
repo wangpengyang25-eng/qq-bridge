@@ -883,6 +883,7 @@ export class Router {
     }
     // 关系措辞表跟着角色卡走
     this._relationsTable = r.relations || null;
+    this._hasLore = !!r.hasLore;
     if (r.error && r.error !== this._personaError) {
       this._personaError = r.error;
       log(`[persona] ${r.error}`);
@@ -1189,6 +1190,7 @@ export class Router {
     this.applyFeatureControl();
     this.applyFollowControl();
     this.applyInitiativeControl();
+    this.applyPersona();
     const ctl = this.readControl().values;
     const ov = this.readOverrides();
     return {
@@ -1201,6 +1203,7 @@ export class Router {
       persona: {
         source: this.cfg.__personaSource || '',
         fewshot: this.cfg.__fewShotSource || '',
+        hasLore: !!this._hasLore,
         error: this._personaError,
       },
       stickerSet: this._activeSet || this.cfg.stickers?.activeSet || '',

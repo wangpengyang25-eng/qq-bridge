@@ -260,7 +260,15 @@ export function loadConfig(file) {
   // 人设：独立文件优先，便于随时改而不动代码
   // 角色卡优先于根目录：llm.persona 指向 personas/<名字>/
   cfg.__personaSource = 'config.json 的 llm.systemPrompt';
-  const cardName = cfg.llm.persona;
+  // 面板上选的角色卡优先于 config.json。
+  // 否则启动时载入的是 config 里那张旧卡，要等第一条消息才切换 —— 日志和状态都会显示错的。
+  let cardName = cfg.llm.persona;
+  try {
+    const ctl = JSON.parse(fs.readFileSync(cfg.controlFile || path.resolve(dir, 'data/control.json'), 'utf8').replace(/^\uFEFF/, ''));
+    const v = ctl?.control?.persona?.file;
+    if (typeof v === 'string') cardName = v;
+  } catch { /* 没有 control.json 就是没改过，正常 */ }
+  cfg.llm.persona = cardName || '';
   const promptBase = cardName ? path.resolve(dir, 'personas', cardName) : dir;
   if (cfg.llm.systemPromptFile) {
     const p = path.resolve(promptBase, cfg.llm.systemPromptFile);
@@ -276,6 +284,17 @@ export function loadConfig(file) {
       }
     } else {
       cfg.__personaError = `找不到文件 ${p}`;
+    }
+  }
+
+  // 角色卡自带的世界观（她"知道的事"）
+  if (cardName) {
+    const loreFile = path.resolve(promptBase, 'lore.txt');
+    if (fs.existsSync(loreFile)) {
+      try {
+        const t = fs.readFileSync(loreFile, 'utf8').replace(/^\uFEFF/, '').trim();
+        if (t) cfg.llm.systemPrompt = `${cfg.llm.systemPrompt}\n\n${t}`;
+      } catch { /* 读不到就当没有 */ }
     }
   }
 
