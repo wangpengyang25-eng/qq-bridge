@@ -224,12 +224,18 @@ export function relationLine(m, over = {}) {
 
   const level = levelOf(eff);
   const cold = level.key === 'lv0' || level.key === 'lv1';
+  const bond = over.bond;
+  const bondText = bond && bonds[bond] ? bonds[bond] : '';
+  // 有称号时，等级只用来表示"多熟"，说话方式以称号为准
+  const levelSuffix = bondText ? '（等级只表示熟不熟；说话方式以下面【你们的关系】为准）' : '';
   const lines = [
-    `【你和他现在的关系】${level.name}（亲密度 ${Math.round(eff)}/100）—— ${guides[level.key]}${cold ? coldHint : ''}`,
+    `【你和他现在的关系】${level.name}（亲密度 ${Math.round(eff)}/100）—— ${guides[level.key]}${cold ? coldHint : ''}${levelSuffix}`,
   ];
 
-  const bond = over.bond;
-  if (bond && bonds[bond]) lines.push(`【你们的关系】${bonds[bond]}`);
+  if (bondText) {
+    // 称号是"现在怎么对他说话"的总开关，要压过角色卡里的一般性习惯
+    lines.push(`【你们的关系 · 语气以此定调】${bondText}`);
+  }
 
   const s = m?.stats || {};
   if (s.messages) lines.push(`你们聊过 ${s.messages} 句，他被你叫过 ${s.ats || 0} 次`);
