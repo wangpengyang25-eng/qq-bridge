@@ -142,6 +142,14 @@ export const DEFAULTS = {
       cooldownMs: 300000,      // 同一个群两次回图的最小间隔
       dailyLimit: 20,          // 每天最多回几张
       visionTimeoutMs: 12000,  // 识别超时就放弃（宁可这次不回）
+      // 识别用的输出预算。推理型模型（deepseek 这类）会先烧 reasoning token，
+      // 预算给小了 content 直接是空字符串，看起来像"模型不支持图片"。
+      maxTokens: 400,
+      // 回图时顺带说一句话（更像个活人，但每次都是一次模型调用）
+      replyWithText: true,
+      // 群里回应时要不要 @ 对方。表情包本身很难带 @，所以 @ 放在文字上，
+      // 图片那条靠"引用"表明是回给谁的。
+      atUser: true,
     },
     cacheFile: 'data/sticker-cache.json', // 识别缓存（相对 config.json 所在目录）
   },
@@ -208,7 +216,10 @@ export function loadConfig(file) {
   let user = {};
   if (fs.existsSync(file)) {
     try {
-      user = JSON.parse(fs.readFileSync(file, 'utf8'));
+      // 去掉 BOM：记事本 / PowerShell 保存 UTF-8 时会加 \uFEFF，
+      // 而 JSON.parse 不认它，报错信息还很难懂（Unexpected token ''）。
+      const raw = fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, '');
+      user = JSON.parse(raw);
     } catch (e) {
       throw new Error(`config.json 解析失败：${e.message}`);
     }

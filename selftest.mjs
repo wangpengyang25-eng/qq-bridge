@@ -41,7 +41,7 @@ import {
   classifyDifficulty,
   searchPredicate,
 } from './src/llm.mjs';
-import { extractContent } from './src/onebot.mjs';
+import { extractContent, OneBot } from './src/onebot.mjs';
 import { MemberStore } from './src/members.mjs';
 import { InitiativeEngine } from './src/initiative.mjs';
 import { StickerSense, decideStickerReply } from './src/stickersense.mjs';
@@ -1180,6 +1180,10 @@ async function main() {
       '回图门禁：跨天额度重置',
       decideStickerReply({ cfg: rc, now, lastSpokeAt: now - 1000, day: '2026-10-20', dayCount: 2 }).ok
     );
+    check(
+      '回图门禁：私聊不看"刚说过话"窗口（那是群聊的防打扰规则）',
+      decideStickerReply({ cfg: rc, now, scene: 'private', lastSpokeAt: 0 }).ok
+    );
 
     // ---- 识别 + 缓存 ----
     const moods = ['卖萌', '大笑', '难过'];
@@ -1249,10 +1253,121 @@ async function main() {
     const r7 = await s4.identify(['sticker-c']);
     check('识别：情绪名已不在词表时重新识别', visionCalls > before || r7 === null, JSON.stringify(r7));
 
+    // 推理型模型可能返回空 content（预算被 reasoning 吃光）：要翻倍重试
+    {
+      let calls = 0;
+      const retrySense = new StickerSense({
+        cacheFile: path.join(TMP, 'sticker-cache3.json'),
+        moods: () => moods,
+        normalize: (w) => (moods.includes(w) ? w : null),
+        fetchImages: async (urls) => ({ images: [{ dataUrl: `data:img/${urls[0]}` }] }),
+        complete: async () => {
+          calls += 1;
+          return calls === 1 ? '' : '{"mood":"大笑"}';
+        },
+      });
+      const r = await retrySense.identify(['sticker-retry']);
+      check('识别：空内容会自动重试一次', r?.mood === '大笑' && calls === 2, `calls=${calls} mood=${r?.mood}`);
+    }
+
     // 默认值必须关着
     const defCfg = loadConfig(path.join(TMP, 'not-exist-config.json'));
     check('默认：读群友表情包关着（不会偷偷产生视觉调用）', defCfg.stickers.reply.enabled === false);
     check('默认：识别缓存文件在 data/ 下', defCfg.stickers.cacheFile.includes('sticker-cache.json'));
+
+    // 私聊事件也必须带表情包信息，否则"私聊只发一张表情包"等于什么都没发生
+    {
+      const ob = new OneBot({ llm: {} }, {});
+      ob.selfId = '1000000001';
+      const evGroup = ob.toEvent({
+        post_type: 'message',
+        message_type: 'group',
+        group_id: 555,
+        user_id: 2001,
+        message_id: 11,
+        message: [{ type: 'mface', data: { url: 'https://e/g.jpg' } }],
+      });
+      const evPrivate = ob.toEvent({
+        post_type: 'message',
+        message_type: 'private',
+        user_id: 2001,
+        message_id: 12,
+        message: [{ type: 'mface', data: { url: 'https://e/p.jpg' } }],
+      });
+      check(
+        '事件：群聊表情包信息完整',
+        evGroup.hasSticker && evGroup.stickerUrls.length === 1,
+        JSON.stringify(evGroup.stickerUrls)
+      );
+      check(
+        '事件：私聊表情包信息完整',
+        evPrivate.hasSticker && evPrivate.stickerUrls.length === 1,
+        JSON.stringify(evPrivate.stickerUrls)
+      );
+    }
+  }
+
+  console.log('\n--- 21. 情绪回应映射 与 关系台词 ---');
+  {
+    const { pickReplyMood, MOOD_REPLY } = await import('./src/stickersense.mjs');
+    const { relationLine, createMember } = await import('./src/profile.mjs');
+    const vocab = ['加油', '探头', '歪头', '好棒', '开心', '庆祝', '摇摆', '略', '哼', '难过'];
+
+    // 1) 不回同一个情绪
+    check(
+      '回应：收到难过不回难过',
+      pickReplyMood('难过', 'lv2', vocab, () => 0) !== '难过',
+      pickReplyMood('难过', 'lv2', vocab, () => 0)
+    );
+    check(
+      '回应：收到加油回的是好棒这类正反馈',
+      ['好棒', '好耶', '开心', '庆祝', '摇摆'].includes(pickReplyMood('加油', 'lv2', vocab, () => 0)),
+      pickReplyMood('加油', 'lv2', vocab, () => 0)
+    );
+
+    // 2) 关系等级影响选择
+    check(
+      '回应：刚认识的人（lv0）偏好克制的回应',
+      pickReplyMood('难过', 'lv0', vocab, () => 0) === '探头',
+      pickReplyMood('难过', 'lv0', vocab, () => 0)
+    );
+    check('回应：映射表覆盖了难过这种常见情绪', Array.isArray(MOOD_REPLY['难过']));
+
+    // 3) 词表里没有映射词时不能崩，也不能回原情绪
+    const tiny = ['难过', '开心'];
+    const fb = pickReplyMood('难过', 'lv2', tiny, () => 0);
+    check('回应：映射词不在套装里时退回不重复的选择', fb !== null && fb !== '难过', String(fb));
+    check('回应：词表为空时返回 null 而不是抛错', pickReplyMood('难过', 'lv2', [], () => 0) === null);
+
+    // ---- 关系台词 ----
+    const m = createMember('1001', '老王', Date.now());
+    m.affinity = 0;
+    check('关系：陌生人档位正确', relationLine(m).includes('陌生'), relationLine(m).split('\n')[0]);
+
+    m.affinity = 60;
+    check('关系：亲密度 60 → 好友', relationLine(m).includes('好友'), relationLine(m).split('\n')[0]);
+    check('关系：带上"该怎么说话"的指引', relationLine(m).includes('没大没小'));
+
+    m.affinity = 85;
+    check('关系：亲密度 85 → 挚友', relationLine(m).includes('挚友'));
+
+    m.note = '他要考试了';
+    check('关系：备注会被带上', relationLine(m).includes('他要考试了'));
+    check('关系：没有成员时返回空串', relationLine(null) === '');
+
+    // 记事本 / PowerShell 保存 UTF-8 会加 BOM，JSON.parse 不认 —— 必须在读配置时剥掉
+    {
+      const bomFile = path.join(TMP, 'config-bom.json');
+      fs.writeFileSync(bomFile, '\uFEFF{"llm":{"apiKey":"x","baseUrl":"http://x/v1","model":"m"}}', 'utf8');
+      let ok = false;
+      try {
+        const c = loadConfig(bomFile);
+        ok = c.llm.model === 'm';
+      } catch (e) {
+        ok = false;
+      }
+      check('配置：带 BOM 的 config.json 也能读', ok);
+    }
   }
 
   const failed = results.filter((r) => !r.ok);

@@ -237,6 +237,10 @@ export class OneBot {
       userName: '',
       text,
       images,
+      // 私聊也要带表情包信息：否则"只发一张表情包"在私聊里等于什么都没发生
+      hasSticker: stickers.length > 0,
+      stickerCount: stickers.length,
+      stickerUrls: stickers.filter(Boolean),
       messageId: msg.message_id,
       isAtMe: true,
       raw: msg,

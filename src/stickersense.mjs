@@ -17,12 +17,13 @@ import { log } from './logger.mjs';
 const VERSION = 1;
 
 /** 评论一条表情包该不该回：纯函数，方便单测（时间从外部传） */
-export function decideStickerReply({ cfg, now, lastSpokeAt, lastReplyAt, day, dayCount }) {
+export function decideStickerReply({ cfg, now, lastSpokeAt, lastReplyAt, day, dayCount, scene = 'group' }) {
   const rc = cfg || {};
   if (!rc.enabled) return { ok: false, why: '开关未开' };
 
-  // 默认只在"机器人刚说过话"之后接梗：避免对着群里所有人的表情包乱回
-  if (rc.onlyAfterBotSpoke !== false) {
+  // "只在机器人刚说过话之后接梗"是**群聊**的防打扰规则：
+  // 群里谁都在发表情包，不能挨个回。私聊是一对一，你发图它就该接，不看这个窗口。
+  if (rc.onlyAfterBotSpoke !== false && scene === 'group') {
     const within = rc.withinMs ?? 120000;
     if (!lastSpokeAt) return { ok: false, why: '机器人还没在这个群说过话' };
     if (now - lastSpokeAt > within) return { ok: false, why: '距离上次说话太久了' };
@@ -41,6 +42,93 @@ export function decideStickerReply({ cfg, now, lastSpokeAt, lastReplyAt, day, da
   return { ok: true, why: '' };
 }
 
+/**
+ * 收到某个情绪时，回哪一种更像"读懂了"而不是回声。
+ * 关键是**不回同一个**：别人发"难过"，你回"难过"是复读机；回"加油"才叫回应。
+ */
+export const MOOD_REPLY = {
+  加油: ['好棒', '好耶'],
+  好棒: ['开心', '庆祝'],
+  好耶: ['庆祝', '摇摆'],
+  开心: ['摇摆', '晃脚脚'],
+  庆祝: ['转圈', '摇摆'],
+  完成: ['好棒', '庆祝'],
+  非常好: ['好棒', '庆祝'],
+  谢谢: ['送你花花', '开心'],
+  送你花花: ['谢谢', '开心'],
+  期待: ['好耶', '庆祝'],
+  来了: ['开心', '好耶'],
+  难过: ['加油', '探头'],
+  沮丧: ['加油', '探头'],
+  好痛: ['加油', '探头'],
+  紧张: ['加油', '好棒'],
+  写不完了: ['加油', '好棒'],
+  颓废: ['加油', '好棒'],
+  准备: ['加油', '好耶'],
+  惊: ['探头', '歪头'],
+  震惊: ['探头', '歪头'],
+  惊讶: ['歪头', '探头'],
+  惊讶2: ['歪头', '探头'],
+  威胁: ['哼', '略'],
+  打你: ['略', '哼'],
+  打你2: ['略', '哼'],
+  呸: ['略', '哼'],
+  哼: ['略', '歪头'],
+  略: ['哼', '呸'],
+  不要: ['摊手', '歪头'],
+  喂: ['歪头', '探头'],
+  寻找: ['指', '探头'],
+  指: ['探头', '歪头'],
+  探头: ['歪头', '惊'],
+  歪头: ['探头', '惊'],
+  盯: ['歪头', '探头'],
+  摇摆: ['晃脚脚', '转圈'],
+  晃脚脚: ['摇摆', '翘脚脚'],
+  翘脚脚: ['晃脚脚', '摇摆'],
+  转圈: ['摇摆', '欢呼'],
+  摊手: ['略', '歪头'],
+  看窗外1: ['探头', '寻找'],
+  看窗外2: ['探头', '寻找'],
+  画圈圈: ['探头', '歪头'],
+};
+
+/** 热络向的回应（关系越近越优先） */
+const WARM = new Set(['庆祝', '摇摆', '好耶', '送你花花', '转圈', '晃脚脚', '翘脚脚', '开心', '非常好', '好棒']);
+/** 克制向的回应（还不太熟时优先） */
+const CALM = new Set(['探头', '歪头', '指', '盯', '寻找', '摊手', '谢谢']);
+
+/**
+ * 挑一个回应情绪。
+ * @param {string} received 对方表情包的情绪
+ * @param {string} levelKey 关系等级 lv0..lv4 —— 同样的图，对熟人回得更热络
+ * @param {string[]} moods  本地词表
+ * @param {Function} [random] 注入随机源，便于测试
+ */
+export function pickReplyMood(received, levelKey = 'lv2', moods = [], random = Math.random) {
+  const has = (m) => moods.includes(m);
+  const candidates = (MOOD_REPLY[received] || []).filter(has);
+
+  let pool = candidates;
+  if (levelKey === 'lv0' || levelKey === 'lv1') {
+    const calm = candidates.filter((m) => CALM.has(m));
+    if (calm.length) pool = calm;
+  } else if (levelKey === 'lv3' || levelKey === 'lv4') {
+    const warm = candidates.filter((m) => WARM.has(m));
+    if (warm.length) pool = warm;
+  }
+
+  // 没有映射（或映射的词不在当前套装里）：退到"友好但不重复"的集合
+  if (!pool.length) {
+    pool = moods.filter((m) => m !== received && (WARM.has(m) || CALM.has(m)));
+  }
+  if (!pool.length) pool = moods.filter((m) => m !== received);
+  if (!pool.length) pool = moods;
+  if (!pool.length) return null;
+
+  const i = Math.floor(random() * pool.length);
+  return pool[Math.min(pool.length - 1, Math.max(0, i))];
+}
+
 export class StickerSense {
   /**
    * @param {object} opts
@@ -50,13 +138,16 @@ export class StickerSense {
    * @param {Function} opts.complete     (messages, opts) => Promise<string>  一次性模型调用
    * @param {Function} opts.fetchImages  (urls, opts) => Promise<{images:{dataUrl}[]}>
    */
-  constructor({ cacheFile, moods, normalize, complete, fetchImages, maxMoods = 60 } = {}) {
+  constructor({ cacheFile, moods, normalize, complete, fetchImages, maxMoods = 60, maxTokens = 400 } = {}) {
     this.cacheFile = cacheFile;
     this.moods = moods || (() => []);
     this.normalize = normalize || ((w) => (String(w || '').trim() || null));
     this.complete = complete || null;
     this.fetchImages = fetchImages || null;
     this.maxMoods = maxMoods;
+    // 推理型模型（deepseek 这类）会先消耗 reasoning token：
+    // 预算给小了，content 直接是空字符串 —— 看起来像"不支持图片"，其实是没钱说话。
+    this.maxTokens = Math.max(64, Number(maxTokens) || 400);
 
     this.hits = 0;
     this.misses = 0;
@@ -173,11 +264,31 @@ export class StickerSense {
 
     let raw = '';
     try {
-      raw = await this.complete(messages, { jsonMode: true, maxTokens: 40 });
+      raw = await this.complete(messages, { jsonMode: true, maxTokens: this.maxTokens });
     } catch (e) {
       this.failures += 1;
       log(`[sticker] 表情包识别调用失败：${e.message}`);
       return null;
+    }
+
+    // 空 content 是推理模型常见的坑：预算被 reasoning 吃光。
+    // 翻倍再试一次，还空就说明这条路真的不通（模型不支持图片会这样）。
+    if (!String(raw || '').trim()) {
+      try {
+        raw = await this.complete(messages, { jsonMode: true, maxTokens: this.maxTokens * 2 });
+      } catch (e) {
+        this.failures += 1;
+        log(`[sticker] 表情包识别重试失败：${e.message}`);
+        return null;
+      }
+      if (!String(raw || '').trim()) {
+        this.failures += 1;
+        log(
+          `[sticker] 模型返回空内容（已重试，maxTokens=${this.maxTokens * 2}）。` +
+            '常见原因：模型不支持图片输入，或推理把预算吃光了。'
+        );
+        return null;
+      }
     }
 
     return this._parse(raw, list);

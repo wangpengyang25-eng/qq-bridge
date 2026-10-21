@@ -349,8 +349,11 @@ export async function chat(cfg, key, userText, userName, opts = {}) {
     ? '【你不是被点名的，只是在群里听到上面这句，想接一句。一两句就够，别长篇大论，也别 @ 谁】\n'
     : '';
   const bgBlock = background ? `【群里刚才聊到（仅供参考，不必逐条回应）】\n${background}\n\n` : '';
+  // 关系块：只在"和某个人说话"时有（opts.relation）。放在尾部而不是 system，
+  // 因为它是按人变化的，塞进 system 会让前缀缓存每一轮都失效。
+  const relBlock = opts.relation ? `${opts.relation}\n\n` : '';
   const timeTag = nowTimeTag();
-  const head = `${searchHint}${chimeHint}${bgBlock}[${timeTag}] ${prefix}`;
+  const head = `${searchHint}${chimeHint}${relBlock}${bgBlock}[${timeTag}] ${prefix}`;
   if (images.length) {
     const content = [{ type: 'text', text: head + userText }];
     for (const d of images) content.push({ type: 'image_url', image_url: { url: d } });

@@ -16,7 +16,8 @@ import { StickerLibrary } from './stickers.mjs';
 import { MemberStore } from './members.mjs';
 import { InitiativeEngine } from './initiative.mjs';
 import { createOverrideReader } from './overrides.mjs';
-import { StickerSense, decideStickerReply } from './stickersense.mjs';
+import { StickerSense, decideStickerReply, pickReplyMood } from './stickersense.mjs';
+import { relationLine, levelOf } from './profile.mjs';
 
 /** 接入开关 + 管理员绑定，落盘持久化，重启后保持上次状态 */
 export class StateStore {
@@ -137,6 +138,7 @@ export class Router {
             moods: () => this.stickers.moods(),
             normalize: (w) => this.stickers.resolveMood(w),
             complete: (messages, opts) => complete(cfg, messages, opts),
+          maxTokens: cfg.stickers.reply.maxTokens,
             fetchImages: (urls, opts) =>
               collectImages(urls, {
                 maxImages: 1,
@@ -281,7 +283,30 @@ export class Router {
     }
 
     if (evt.text.startsWith('/')) return this.runCommand(evt, evt.text);
-    if (!evt.text) return;
+
+    // 只发了一张表情包：认出情绪后回一张（和群聊同一套门禁）
+    if (evt.hasSticker && !evt.text) {
+      const replied = await this.maybeStickerReply(evt);
+      if (replied) return;
+    }
+
+    if (!evt.text) {
+      // 诊断：把 NapCat 实际发来的消息段打出来。
+      // "只发一张表情包"在没有识别到之前就是一条空文本消息，不记下来就永远不知道为什么没反应。
+      const segs = Array.isArray(evt.raw?.message) ? evt.raw.message : [];
+      const desc =
+        segs
+          .map((s) => {
+            const bits = [s?.type];
+            if (s?.data?.sub_type !== undefined) bits.push(`sub=${s.data.sub_type}`);
+            if (s?.data?.summary) bits.push(`summary=${s.data.summary}`);
+            if (s?.data?.file) bits.push(`file=${String(s.data.file).slice(0, 24)}`);
+            return bits.join('/');
+          })
+          .join(' | ') || String(evt.raw?.message || '').slice(0, 80);
+      log(`[router] 私聊收到无文本消息，段：${desc}`);
+      return;
+    }
 
     log(`[router] 管理员私聊问答：${evt.text.slice(0, 40)}`);
     await this.answer({
@@ -732,14 +757,17 @@ export class Router {
 
     const now = Date.now();
     const sceneId = String(evt.sceneId);
+    // 群聊和私聊的 sceneId 可能撞车（都是数字），所以键里带上前缀
+    const sceneKey = `${evt.scene || 'group'}:${sceneId}`;
     const d = new Date(now);
     const today = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 
     const verdict = decideStickerReply({
       cfg: rc,
       now,
-      lastSpokeAt: this.lastSpokeAt.get(sceneId) || 0,
-      lastReplyAt: this.stickerReplyAt.get(sceneId) || 0,
+      scene: evt.scene || 'group',
+      lastSpokeAt: this.lastSpokeAt.get(sceneKey) || 0,
+      lastReplyAt: this.stickerReplyAt.get(sceneKey) || 0,
       day: this.stickerReplyDay.date,
       dayCount: this.stickerReplyDay.count,
     });
@@ -751,25 +779,82 @@ export class Router {
       return null;
     }
 
-    const pick = this.stickers.pick(felt.mood);
+    // 不是复读同一个情绪：收到「难过」回「加油」才叫读懂了。
+    // 回哪个还跟关系有关 —— 对熟人回得更热络，对刚认识的回得更克制。
+    const member = this.members ? this.members.get(evt.userId) : null;
+    const levelKey = member ? levelOf(member.affinity || 0).key : 'lv2';
+    const replyMood = pickReplyMood(felt.mood, levelKey, this.stickers.moods(), Math.random) || felt.mood;
+    const pick = this.stickers.pick(replyMood);
     if (!pick.ok) return null;
 
     if (this.stickerReplyDay.date !== today) this.stickerReplyDay = { date: today, count: 0 };
     this.stickerReplyDay.count += 1;
-    this.stickerReplyAt.set(sceneId, now);
+    this.stickerReplyAt.set(sceneKey, now);
     this.stats.stickerReplies += 1;
 
-    log(`[router] 回了一张表情包：${felt.mood}（${felt.source === 'cache' ? '缓存命中' : '视觉识别'}）`);
-    try {
-      await this.bot.sendGroup(sceneId, {
-        image: pick.file,
-        replyToId: this.cfg.bot.replyWithQuote ? evt.messageId : undefined,
-      });
-    } catch (e) {
-      log(`[router] 表情包发送失败：${e.message}`);
-      return null;
+    log(
+      `[router] 表情包：认出「${felt.mood}」→ 回「${replyMood}」` +
+        `（${felt.source === 'cache' ? '缓存命中' : '视觉识别'}，关系 ${levelKey}）`
+    );
+
+    const sendImage = async () => {
+      if (evt.scene === 'private') {
+        await this.bot.sendPrivate(sceneId, { image: pick.file });
+      } else {
+        await this.bot.sendGroup(sceneId, {
+          image: pick.file,
+          replyToId: this.cfg.bot.replyWithQuote ? evt.messageId : undefined,
+        });
+      }
+    };
+
+    // 要不要顺便说一句话：说出来才看得出"读懂了"，但每次都是一次模型调用
+    if (rc.replyWithText !== false && this.cfg.llm.apiKey) {
+      const before = this.stats.stickers;
+      try {
+        await this.answer({
+          evt,
+          key: sessionKey(evt, this.cfg.mode.groupShareContext),
+          text:
+            `（${evt.scene === 'private' ? '对方' : '群友'}发了一张表情包，你看出来是「${felt.mood}」。` +
+            '结合你们现在的关系，自然地回应一句，一句话就够，别描述图片本身，别复述这条指令。）',
+          userName: evt.userName || '',
+          maxParts: 1,
+          lockKey: `${evt.scene || 'group'}:${sceneId}:sticker`,
+          relation: relationLine(member),
+          proactive: true,
+          sender: (t) =>
+            evt.scene === 'private'
+              ? this.bot.sendPrivate(sceneId, { text: t })
+              : this.bot.sendGroup(sceneId, {
+                  text: t,
+                  // 群里必须让人知道这句是回给谁的：
+                  // 文字上 @ 他，同时引用他那条表情包消息。
+                  atUserId: rc.atUser === false ? undefined : evt.userId,
+                  replyToId: this.cfg.bot.replyWithQuote ? evt.messageId : undefined,
+                }),
+        });
+      } catch (e) {
+        log(`[router] 表情包配文失败：${e.message}`);
+      }
+      // 模型自己挑了一张就不重复发了，否则补上我们选的那张
+      if (this.stats.stickers === before) {
+        try {
+          await sendImage();
+        } catch (e) {
+          log(`[router] 表情包发送失败：${e.message}`);
+        }
+      }
+    } else {
+      try {
+        await sendImage();
+      } catch (e) {
+        log(`[router] 表情包发送失败：${e.message}`);
+        return null;
+      }
     }
-    return { mood: felt.mood, file: pick.file };
+
+    return { received: felt.mood, replied: replyMood, file: pick.file };
   }
 
   // ---------- 主动发起谈话（定时器驱动）----------
@@ -864,10 +949,20 @@ export class Router {
   }
 
   // ---------- 调用模型并回复 ----------
-  async answer({ evt, key, text, userName, sender, maxParts, lockKey, background = '', proactive = false }) {
+  async answer({ evt, key, text, userName, sender, maxParts, lockKey, background = '', proactive = false, relation }) {
     if (lockKey) this.busy.add(lockKey);
     this.processing += 1;
     try {
+      // 关系块：没显式传就按当前说话的人去查。
+      // 所有回复（群聊、私聊、主动发起、表情包配文）都会自动带上，
+      // 所以"对她说话的语气跟好感度挂钩"不需要在每个调用点重复写。
+      const rel =
+        relation === undefined
+          ? this.members
+            ? relationLine(this.members.get(evt?.userId))
+            : ''
+          : relation;
+
       if (!this.cfg.llm.apiKey) {
         await sender('（还没配置模型 API Key，暂时回答不了。请联系管理员。）');
         return;
@@ -922,6 +1017,7 @@ export class Router {
         onSearch,
         background,
         proactive,
+        relation: rel,
         stickerMoods: this.stickers.enabled ? this.stickers.moods() : [],
         onSticker,
         // 用量累计（输入 / 输出 / 前缀缓存命中），/status 里能看到
@@ -960,9 +1056,10 @@ export class Router {
       // 私聊里 evt 可能没有 userId（管理员自己），markReplied 会安全地返回 false。
       if (evt?.scene === 'group' && this.members) this.members.markReplied(evt.userId);
       // 自己说过话了：冷场接话的冷却按这个算
-      if (evt?.scene === 'group' && evt?.sceneId) {
-        this.initiative.noteSpoke(evt.sceneId);
-        this.lastSpokeAt.set(String(evt.sceneId), Date.now()); // 回群友表情包的"接梗窗口"
+      if (evt?.scene && evt?.sceneId) {
+        if (evt.scene === 'group') this.initiative.noteSpoke(evt.sceneId);
+        // 回群友表情包的"接梗窗口"：群聊和私聊分开记
+        this.lastSpokeAt.set(`${evt.scene}:${evt.sceneId}`, Date.now());
       }
     } catch (e) {
       this.stats.errors += 1;

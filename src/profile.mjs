@@ -165,6 +165,32 @@ export function decayAll(members, now = Date.now()) {
     .filter((x) => x.lost > 0);
 }
 
+/** 各等级下"该怎么说话"的一句话指引 */
+export const LEVEL_GUIDE = {
+  lv0: '还不太熟，客气一点，别自作熟络',
+  lv1: '见过几次，可以随意些，但别太主动',
+  lv2: '比较熟了，可以开玩笑、可以接梗',
+  lv3: '很熟，说话可以没大没小、可以互损',
+  lv4: '关系很近，可以撒娇、可以互怼、也可以主动关心',
+};
+
+/**
+ * 生成"你和这个人的关系"提示块，注入到本轮消息里。
+ *
+ * 注意**不要**放进 system：system 是稳定前缀，动它会连累整段历史的缓存命中。
+ * 这里只放等级（5 档，变化很慢）而不是具体分数（每条消息都在变），
+ * 免得同一段对话里前缀一直抖。
+ */
+export function relationLine(m, { maxNote = 60 } = {}) {
+  if (!m) return '';
+  const level = levelOf(m.affinity || 0);
+  const lines = [`【你和他现在的关系】${level.name} —— ${LEVEL_GUIDE[level.key]}`];
+  const s = m.stats || {};
+  if (s.messages) lines.push(`你们聊过 ${s.messages} 句，他被你叫过 ${s.ats || 0} 次`);
+  if (m.note) lines.push(`【你记得关于他的事】${String(m.note).slice(0, maxNote)}`);
+  return lines.join('\n');
+}
+
 /** 汇总统计，给界面顶部用。 */
 export function summarize(members, now = Date.now()) {
   const today = dayKey(now);
