@@ -1544,6 +1544,13 @@ async function main() {
     const zero = new FollowTracker({ enabled: true, windowMs: 0 });
     zero.mark('g1', 'u1', T0);
     check('连续：窗口为 0 时不放行', zero.isFollowing('g1', 'u1', T0) === false);
+
+    // @ 了别人就不该接：连续对话不能变成"你 @ 谁她都插嘴"
+    const { addressedToOthers } = await import('./src/followup.mjs');
+    check('连续：@ 别人 = 不是对她说的', addressedToOthers({ ats: ['999'], isAtMe: false }) === true);
+    check('连续：@ 里包含她 = 就是对她说的', addressedToOthers({ ats: ['999', '1'], isAtMe: true }) === false);
+    check('连续：没 @ 任何人 = 不适用这条规则', addressedToOthers({ ats: [], isAtMe: false }) === false);
+    check('连续：@ 全体（ats 里有她）仍然算对她', addressedToOthers({ ats: ['1'], isAtMe: true }) === false);
   }
 
   const failed = results.filter((r) => !r.ok);

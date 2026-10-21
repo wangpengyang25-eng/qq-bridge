@@ -9,6 +9,18 @@
 
 const DEFAULTS = { enabled: true, windowMs: 180000 };
 
+/**
+ * 这句话是在 @ 别人吗？
+ *
+ * 群里 @ 了别人，就说明这句话不是说给她听的 —— 哪怕她刚跟这个人聊得正热。
+ * 不判断这个，连续对话会变成"你 @ 谁她都插嘴"。
+ */
+export function addressedToOthers(evt) {
+  if (!evt) return false;
+  if (evt.isAtMe !== false) return false; // 里面包含她，那就是对她说的
+  return Array.isArray(evt.ats) && evt.ats.length > 0;
+}
+
 export class FollowTracker {
   constructor({ enabled = DEFAULTS.enabled, windowMs = DEFAULTS.windowMs } = {}) {
     this.enabled = enabled;

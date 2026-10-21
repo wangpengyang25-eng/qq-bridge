@@ -20,7 +20,7 @@ import { createControlReader } from './control.mjs';
 import { StickerSense, decideStickerReply, pickReplyMood } from './stickersense.mjs';
 import { relationLine, levelOf } from './profile.mjs';
 import { PersonaLoader } from './persona.mjs';
-import { FollowTracker } from './followup.mjs';
+import { FollowTracker, addressedToOthers } from './followup.mjs';
 
 /** 接入开关 + 管理员绑定，落盘持久化，重启后保持上次状态 */
 export class StateStore {
@@ -372,6 +372,11 @@ export class Router {
         log(`[router] 群 ${evt.sceneId} 有人插话，连续对话结束`);
       }
       following = this.follow.isFollowing(evt.sceneId, evt.userId);
+      // @ 了别人：这句不是说给她听的，不接（连续对话状态保留，之后他接着聊还能用）
+      if (addressedToOthers(evt)) {
+        if (following) log(`[router] ${evt.userName || evt.userId} 在 @ 别人，不接这句`);
+        following = false;
+      }
       if (following && evt.isAtMe === false) {
         log(`[router] 连续对话中：${evt.userName || evt.userId} 没 @ 也算在问她`);
       }
