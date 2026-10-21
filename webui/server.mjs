@@ -85,7 +85,11 @@ function personaRelations(name) {
   }
 }
 
-/** 面板上可选的角色卡 */
+/** 当前角色卡允许的关系称号（卡里没写才退回默认列表） */
+function activeBonds() {
+  const r = personaRelations(activePersona());
+  return r?.bonds?.length ? r.bonds : BOND_NAMES;
+}
 function listPersonas() {
   const out = [];
   if (CFG_RAW.llm?.systemPromptFile) {
@@ -281,11 +285,14 @@ async function saveOverride(qq, patch) {
   }
   if (typeof patch.note === 'string') cur.note = patch.note.slice(0, 500);
   if (typeof patch.muted === 'boolean') cur.muted = patch.muted;
-  // 关系称号：空字符串表示取消
+  // 关系称号：不按固定列表校验。
+  // 名单跟着角色卡走，前端下拉已经限制了可选值；后端再硬校验一次，
+  // 换个角色卡就会把新称号当成非法值悄悄丢掉（这坑踩过两次）。
+  // 真正无效的称号在渲染时会被忽略（relationLine 找不到就不输出），所以留脏值无害。
   if (typeof patch.bond === 'string') {
-    const b = patch.bond.trim();
-    if (!b) delete cur.bond;
-    else if (BOND_NAMES.includes(b)) cur.bond = b;
+    const b = patch.bond.trim().slice(0, 24);
+    if (b) cur.bond = b;
+    else delete cur.bond;
   }
 
   cur.at = Date.now();
@@ -384,9 +391,7 @@ const server = http.createServer(async (req, res) => {
         rules: RULES,
         levels: LEVELS,
         // 关系称号跟着当前角色卡走：黑眼的卡里是舞伴/母女/师徒……，枝堇的是闺蜜/恋人……
-        bonds: (personaRelations(activePersona())?.bonds?.length
-          ? personaRelations(activePersona()).bonds
-          : BOND_NAMES),
+        bonds: activeBonds(),
         persona: activePersona() || '默认',
       });
     }
