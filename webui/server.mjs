@@ -15,6 +15,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readJson, writeJson } from './src/store.mjs';
 import { resolvePaths } from './src/paths.mjs';
+import { normalize, SCHEMA } from '../src/control.mjs';
+import { DEFAULTS as INITIATIVE_DEFAULTS } from '../src/initiative.mjs';
 import { summarize, levelOf, nextLevelGap, RULES, LEVELS, proactiveCandidates, BOND_NAMES } from './src/profile.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -80,26 +82,105 @@ function loadAll() {
   return { members: merged, updatedAt: doc.updatedAt ?? null };
 }
 
-/** 读面板自己的开关文件；文件不存在时返回空对象（= 全部跟随 config.json） */
+/** 读面板自己的设置文件；文件不存在时返回空对象（= 全部跟随 config.json） */
 function loadControl() {
-  const doc = readJson(CONTROL_FILE, { version: 1, control: {} });
-  const c = doc?.control && typeof doc.control === 'object' ? doc.control : {};
-  const out = {};
-  for (const k of ['initiative', 'chime', 'callout', 'stickerReply']) {
-    if (typeof c[k] === 'boolean') out[k] = c[k];
-  }
-  return out;
+  const doc = readJson(CONTROL_FILE, { version: 2, control: {} });
+  return normalize(doc?.control);
 }
 
+/** 深合并一层分组后清洗（面板每次只改一个字段，不能把同组其他字段冲掉） */
 async function saveControl(patch) {
-  const doc = readJson(CONTROL_FILE, { version: 1, control: {} });
+  const doc = readJson(CONTROL_FILE, { version: 2, control: {} });
   if (!doc.control || typeof doc.control !== 'object') doc.control = {};
-  for (const k of ['initiative', 'chime', 'callout', 'stickerReply']) {
-    if (typeof patch[k] === 'boolean') doc.control[k] = patch[k];
+  const src = patch && typeof patch === 'object' ? patch : {};
+  for (const [group, fields] of Object.entries(src)) {
+    if (!fields || typeof fields !== 'object') continue;
+    const cur = { ...(doc.control[group] || {}) };
+    for (const [k, v] of Object.entries(fields)) {
+      if (v === null) delete cur[k]; // null = 恢复默认（删掉覆盖项）
+      else cur[k] = v;
+    }
+    if (Object.keys(cur).length) doc.control[group] = cur;
+    else delete doc.control[group];
   }
+  doc.version = 2;
   doc.updatedAt = Date.now();
   await writeJson(CONTROL_FILE, doc);
   return loadControl();
+}
+
+/** 读配置里跟"运行时设置"相关的数值（不含任何密钥），作为面板显示的默认值 */
+function readRawSettings() {
+  if (!BRIDGE_DIR) return null;
+  try {
+    const cfg = JSON.parse(fs.readFileSync(path.join(BRIDGE_DIR, 'config.json'), 'utf8').replace(/^\uFEFF/, ''));
+    const st = cfg.stickers?.reply || {};
+    const p = cfg.proactive || {};
+    // config.json 里没写的项要用代码默认值兜底，否则面板上会显示空白
+    const ini = { ...INITIATIVE_DEFAULTS, ...(p.initiative || {}) };
+    const ch = { ...INITIATIVE_DEFAULTS.chime, ...(p.initiative?.chime || {}) };
+    const ca = { ...INITIATIVE_DEFAULTS.callout, ...(p.initiative?.callout || {}) };
+    return {
+      sticker: {
+        enabled: st.enabled,
+        cooldownSec: Math.round((st.cooldownMs ?? 300000) / 1000),
+        dailyLimit: st.dailyLimit,
+        onlyAfterBotSpoke: st.onlyAfterBotSpoke,
+        withinSec: Math.round((st.withinMs ?? 120000) / 1000),
+        replyWithText: st.replyWithText !== false,
+        atUser: st.atUser !== false,
+      },
+      initiative: {
+        enabled: ini.enabled,
+        dailyLimit: ini.dailyLimit,
+        quietStart: ini.quietHours?.start ?? 0,
+        quietEnd: ini.quietHours?.end ?? 0,
+      },
+      chime: {
+        enabled: ch.enabled,
+        quietAfterMin: Math.round((ch.quietAfterMs ?? 1200000) / 60000),
+        staleAfterMin: Math.round((ch.staleAfterMs ?? 7200000) / 60000),
+        cooldownMin: Math.round((ch.cooldownMs ?? 1800000) / 60000),
+        minActivity: ch.minActivity,
+      },
+      callout: {
+        enabled: ca.enabled,
+        minAffinity: ca.minAffinity,
+        minMessages: ca.minMessages,
+        perUserCooldownDays: Math.round((ca.perUserCooldownMs ?? 259200000) / 86400000),
+        cooldownMin: Math.round((ca.cooldownMs ?? 3600000) / 60000),
+      },
+      interject: {
+        enabled: p.enabled,
+        onImage: p.onImage,
+        onQuestion: p.onQuestion,
+        cooldownSec: Math.round((p.minIntervalMs ?? 600000) / 1000),
+        dailyLimit: p.dailyLimit,
+      },
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** 面板显示用：config.json 的值 + 面板覆盖后的生效值 */
+function effectiveSettings() {
+  const base = readRawSettings();
+  const control = loadControl();
+  const out = {};
+  for (const [group, fields] of Object.entries(SCHEMA)) {
+    out[group] = {};
+    for (const key of Object.keys(fields)) {
+      const ov = control[group]?.[key];
+      const df = base?.[group]?.[key];
+      out[group][key] = {
+        value: ov !== undefined ? ov : df,
+        overridden: ov !== undefined,
+        base: df,
+      };
+    }
+  }
+  return { groups: out, schema: SCHEMA, hasConfig: !!base };
 }
 
 /** 只写 overrides.json（bridge 不看这个文件，只有面板用） */
@@ -222,13 +303,13 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (p === '/api/control' && req.method === 'GET') {
-      return json(res, 200, { control: loadControl(), file: CONTROL_FILE });
+      return json(res, 200, { ...effectiveSettings(), file: CONTROL_FILE });
     }
 
     if (p === '/api/control' && (req.method === 'PATCH' || req.method === 'POST')) {
       const body = await readBody(req);
-      const next = await saveControl(body || {});
-      return json(res, 200, { ok: true, control: next });
+      await saveControl(body?.control || body || {});
+      return json(res, 200, { ok: true, ...effectiveSettings() });
     }
 
     if (p === '/api/config') {

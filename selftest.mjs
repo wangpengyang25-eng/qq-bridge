@@ -1389,22 +1389,39 @@ async function main() {
       check('覆盖：非法称号被忽略而不是崩', !relationLine(base, { bond: '随便写的' }).includes('随便写的'));
     }
 
-    // ---- 面板开关文件 ----
+    // ---- 面板设置文件（开关 + 数值参数）----
     {
-      const { createControlReader } = await import('./src/control.mjs');
+      const { createControlReader, normalize } = await import('./src/control.mjs');
       const cf = path.join(TMP, 'control-test.json');
       const read0 = createControlReader(cf);
-      check('开关：文件不存在时返回空（全部跟随 config）', Object.keys(read0().values).length === 0);
+      check('设置：文件不存在时返回空（全部跟随 config）', Object.keys(read0().values).length === 0);
 
-      fs.writeFileSync(cf, JSON.stringify({ control: { stickerReply: false, chime: true, junk: 1 } }), 'utf8');
-      const read1 = createControlReader(cf);
-      const v = read1().values;
-      check('开关：读得到布尔开关', v.stickerReply === false && v.chime === true, JSON.stringify(v));
-      check('开关：未知字段被忽略', !('junk' in v));
+      fs.writeFileSync(
+        cf,
+        JSON.stringify({
+          control: {
+            sticker: { enabled: false, cooldownSec: 90, dailyLimit: 5 },
+            chime: { enabled: true, quietAfterMin: 10 },
+            junkGroup: { x: 1 },
+          },
+        }),
+        'utf8'
+      );
+      const v = createControlReader(cf)().values;
+      check('设置：读得到分组开关与数值', v.sticker?.enabled === false && v.sticker?.cooldownSec === 90, JSON.stringify(v));
+      check('设置：读得到另一组', v.chime?.enabled === true && v.chime?.quietAfterMin === 10);
+      check('设置：未知分组被忽略', !('junkGroup' in v));
+
+      // 范围保护：面板手滑填个天文数字也不该把频率设成 0
+      const n = normalize({ sticker: { cooldownSec: 999999, dailyLimit: -5 }, initiative: { quietStart: 99 } });
+      check('设置：超范围会被夹到边界', n.sticker.cooldownSec === 86400 && n.sticker.dailyLimit === 0, JSON.stringify(n.sticker));
+      check('设置：小时数夹在 0-23', n.initiative.quietStart === 23, String(n.initiative.quietStart));
+
+      const bad = normalize({ sticker: { enabled: 'yes' } });
+      check('设置：类型不对就丢弃（字符串不当布尔用）', bad.sticker === undefined, JSON.stringify(bad));
 
       fs.writeFileSync(cf, '{ 坏掉的 JSON', 'utf8');
-      const read2 = createControlReader(cf);
-      check('开关：坏文件不抛错', typeof read2().values === 'object');
+      check('设置：坏文件不抛错', typeof createControlReader(cf)().values === 'object');
     }
   }
 

@@ -130,6 +130,10 @@ export class Router {
       isMuted: (qq) => this.readOverrides().muted.has(String(qq)),
     });
     this.initiativeTimer = null;
+    // 面板设置要覆盖到的配置，先存一份"基线"（来自 config.json），
+    // 这样每次应用面板设置都是"基线 + 覆盖"，不会越改越偏。
+    this._baseInitiative = JSON.parse(JSON.stringify(this.initiative.cfg));
+    this._baseProactive = JSON.parse(JSON.stringify(cfg.proactive || {}));
 
     // 读群友的表情包：识别情绪 + 决定回不回。
     // 只在 cfg.stickers.reply.enabled 时创建 —— 关着的时候连下载都不会发生。
@@ -444,7 +448,7 @@ export class Router {
   /** 是否启用主动插话：管理员的显式设定优先，否则跟随 config.json */
   chimeEnabled() {
     if (this.state.proactive === true || this.state.proactive === false) return this.state.proactive;
-    return this.cfg.proactive?.enabled === true;
+    return this.effProactive().enabled === true;
   }
 
   /** 触发信号：叫了她的名字但没 @（最自然的插话时机）；可选放宽到"在征求意见" */
@@ -452,7 +456,7 @@ export class Router {
     const t = String(evt.text || '');
     const hasImage = Array.isArray(evt.images) && evt.images.length > 0;
     if (!t && !hasImage) return false;
-    const p = this.cfg.proactive || {};
+    const p = this.effProactive();
     const names = (Array.isArray(p.names) && p.names.length ? p.names : [this.bot.botName, '大肥鱼'])
       .map((x) => String(x || '').trim())
       .filter(Boolean);
@@ -465,13 +469,13 @@ export class Router {
 
   /** 群里这会儿够不够热闹（太冷的时候除非点名，否则别硬插话） */
   chimeActive(evt) {
-    const p = this.cfg.proactive || {};
+    const p = this.effProactive();
     const n = this.ambient.recent(evt.sceneId, p.windowMs ?? 180000);
     return n >= (p.minActivity ?? 3);
   }
 
   async maybeChimeIn(evt, inScope) {
-    const p = this.cfg.proactive || {};
+    const p = this.effProactive();
     if (!this.chimeEnabled()) return;
     if (!this.state.enabled || !inScope) return;
     if (!this.chimeWanted(evt)) return;
@@ -680,7 +684,7 @@ export class Router {
       case '/chime':
       case '/插话': {
         const arg = (rawText.trim().split(/\s+/)[1] || '').toLowerCase();
-        const p = this.cfg.proactive || {};
+        const p = this.effProactive();
         const names = (Array.isArray(p.names) && p.names.length ? p.names : [this.bot.botName, '大肥鱼'])
           .map((x) => String(x || '').trim())
           .filter(Boolean);
@@ -749,6 +753,75 @@ export class Router {
     }
   }
 
+  // ---------- 面板设置（运行时可改，合并到配置之上）----------
+
+  /** 表情包回应的生效配置：config.json 为底，面板设置覆盖 */
+  effStickerReply() {
+    const base = this.cfg.stickers?.reply || {};
+    const o = this.readControl().values.sticker || {};
+    const pick = (v, fallback) => (v === undefined ? fallback : v);
+    return {
+      ...base,
+      enabled: pick(o.enabled, base.enabled),
+      cooldownMs: pick(o.cooldownSec, base.cooldownMs / 1000) * 1000,
+      dailyLimit: pick(o.dailyLimit, base.dailyLimit),
+      onlyAfterBotSpoke: pick(o.onlyAfterBotSpoke, base.onlyAfterBotSpoke),
+      withinMs: pick(o.withinSec, base.withinMs / 1000) * 1000,
+      replyWithText: pick(o.replyWithText, base.replyWithText),
+      atUser: pick(o.atUser, base.atUser),
+    };
+  }
+
+  /** "听到就插话"的生效配置（老的 proactive 那套） */
+  effProactive() {
+    const base = this._baseProactive;
+    const o = this.readControl().values.interject || {};
+    const pick = (v, fallback) => (v === undefined ? fallback : v);
+    return {
+      ...base,
+      enabled: pick(o.enabled, base.enabled),
+      onImage: pick(o.onImage, base.onImage),
+      onQuestion: pick(o.onQuestion, base.onQuestion),
+      minIntervalMs: pick(o.cooldownSec, base.minIntervalMs / 1000) * 1000,
+      dailyLimit: pick(o.dailyLimit, base.dailyLimit),
+    };
+  }
+
+  /** 把面板上的主动发起设置应用到引擎（每次 tick 前调用） */
+  applyInitiativeControl() {
+    const c = this.readControl().values;
+    const base = this._baseInitiative;
+    const i = c.initiative || {};
+    const ch = c.chime || {};
+    const ca = c.callout || {};
+    const pick = (v, fallback) => (v === undefined ? fallback : v);
+
+    this.initiative.cfg.enabled = pick(i.enabled, base.enabled);
+    this.initiative.cfg.dailyLimit = pick(i.dailyLimit, base.dailyLimit);
+    this.initiative.cfg.quietHours = {
+      start: pick(i.quietStart, base.quietHours?.start ?? 0),
+      end: pick(i.quietEnd, base.quietHours?.end ?? 0),
+    };
+
+    this.initiative.cfg.chime = {
+      ...base.chime,
+      enabled: pick(ch.enabled, base.chime.enabled),
+      quietAfterMs: pick(ch.quietAfterMin, base.chime.quietAfterMs / 60000) * 60000,
+      staleAfterMs: pick(ch.staleAfterMin, base.chime.staleAfterMs / 60000) * 60000,
+      cooldownMs: pick(ch.cooldownMin, base.chime.cooldownMs / 60000) * 60000,
+      minActivity: pick(ch.minActivity, base.chime.minActivity),
+    };
+
+    this.initiative.cfg.callout = {
+      ...base.callout,
+      enabled: pick(ca.enabled, base.callout.enabled),
+      minAffinity: pick(ca.minAffinity, base.callout.minAffinity),
+      minMessages: pick(ca.minMessages, base.callout.minMessages),
+      perUserCooldownMs: pick(ca.perUserCooldownDays, base.callout.perUserCooldownMs / 86400000) * 86400000,
+      cooldownMs: pick(ca.cooldownMin, base.callout.cooldownMs / 60000) * 60000,
+    };
+  }
+
   // ---------- 读群友的表情包，回一张 ----------
   //
   // 与"回答时顺手发表情"是两条路：那条由模型决定发不发、发哪个情绪；
@@ -757,7 +830,7 @@ export class Router {
   async maybeStickerReply(evt) {
     // 面板上关掉就立刻生效（不用重启）
     if (this.readControl().values.stickerReply === false) return null;
-    const rc = this.cfg.stickers?.reply;
+    const rc = this.effStickerReply();
     if (!rc?.enabled || !this.stickerSense) return null;
     if (!evt?.hasSticker || !evt?.stickerUrls?.length) return null;
     if (!this.state.enabled) return null;
@@ -899,9 +972,8 @@ export class Router {
    */
   async runInitiative(now = Date.now()) {
     if (!this.state.enabled) return null; // 总开关断着就不主动开口
-    // 面板开关优先于 config.json（缺省表示跟随配置）
-    const ctl = this.readControl().values;
-    this.initiative.setSwitches({ enabled: ctl.initiative, chime: ctl.chime, callout: ctl.callout });
+    // 面板上的开关和数值优先于 config.json（缺省表示跟随配置）
+    this.applyInitiativeControl();
     const action = this.initiative.tick(now);
     if (!action) return null;
 

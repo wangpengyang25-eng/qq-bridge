@@ -14,6 +14,7 @@ const state = {
   rules: null,
   bonds: [],
   control: {},
+  effective: null,
   selected: null,
   sort: 'affinity',
 };
@@ -67,44 +68,124 @@ function renderStatus(s) {
 }
 
 // 功能开关：改动立刻写 data/control.json，bridge 3 秒内读到
-const SWITCHES = [
-  { key: 'stickerReply', name: '表情包回应', desc: '群友发表情包时认出情绪并回一张' },
-  { key: 'initiative', name: '主动发起（总）', desc: '没人说话也会自己开口的总开关' },
-  { key: 'chime', name: '冷场接话', desc: '群里安静一阵后，接一句刚才的话题' },
-  { key: 'callout', name: '按人点名', desc: '主动 @ 某个该联系的人（社交压力最大）' },
-];
+// 运行时设置：分组 → 字段 → 【中文标签, 单位】
+const GROUP_META = {
+  sticker: { title: 'A · 群友发表情包时回应', desc: '认出情绪、回一张不同情绪的图' },
+  interject: { title: 'C · 听到就插话', desc: '有人提到她的名字、或有人发图时，顺口接一句' },
+  initiative: { title: 'B · 主动发起（总开关与额度）', desc: '没人说话时也会自己开口' },
+  chime: { title: 'B · 冷场接话', desc: '群里刚才还热闹，安静一阵后接一句' },
+  callout: { title: 'D · 按人点名', desc: '主动 @ 某个"该联系的人"（社交压力最大）' },
+};
+
+const FIELD_META = {
+  sticker: {
+    enabled: ['启用', 'bool'],
+    cooldownSec: ['同一个群两次的最小间隔', '秒'],
+    dailyLimit: ['每天最多回几张', '张'],
+    onlyAfterBotSpoke: ['只在她刚说过话之后接', 'bool'],
+    withinSec: ['"刚说过话"的判定窗口', '秒'],
+    replyWithText: ['回图时顺带说一句话', 'bool'],
+    atUser: ['群里回应时 @ 对方', 'bool'],
+  },
+  interject: {
+    enabled: ['启用', 'bool'],
+    onImage: ['有人发图就触发', 'bool'],
+    onQuestion: ['有人征求意见就触发', 'bool'],
+    cooldownSec: ['同一个群两次的最小间隔', '秒'],
+    dailyLimit: ['每天最多插几次', '次'],
+  },
+  initiative: {
+    enabled: ['总开关', 'bool'],
+    dailyLimit: ['每天最多主动说几次（冷场+点名合计）', '次'],
+    quietStart: ['免打扰开始（整点）', '点'],
+    quietEnd: ['免打扰结束（整点）', '点'],
+  },
+  chime: {
+    enabled: ['启用', 'bool'],
+    quietAfterMin: ['群安静多久后才考虑接话', '分钟'],
+    staleAfterMin: ['超过多久就不接了（话题凉了）', '分钟'],
+    cooldownMin: ['同一个群两次的最小间隔', '分钟'],
+    minActivity: ['接话前该群至少有几条消息', '条'],
+  },
+  callout: {
+    enabled: ['启用', 'bool'],
+    minAffinity: ['亲密度门槛', '分'],
+    minMessages: ['至少说过几句话', '句'],
+    perUserCooldownDays: ['同一个人多少天内最多被点一次', '天'],
+    cooldownMin: ['同一个群两次的最小间隔', '分钟'],
+  },
+};
 
 function renderSwitches() {
   const box = $('#switches');
-  box.innerHTML = SWITCHES.map((s) => {
-    const v = state.control[s.key];
-    const on = v === true;
-    const unknown = v === undefined;
-    return `<label class="switch-row ${unknown ? 'inherit' : ''}">
-      <input type="checkbox" data-key="${s.key}" ${on ? 'checked' : ''}>
-      <span class="sw-text">
-        <b>${esc(s.name)}</b>
-        <em>${esc(s.desc)}${unknown ? ' · 跟随 config.json' : ''}</em>
-      </span>
-    </label>`;
-  }).join('');
+  const groups = state.effective?.groups;
+  if (!groups) {
+    box.innerHTML = '<p class="hint" style="padding:14px">读不到设置（bridge 没连上？）</p>';
+    return;
+  }
 
-  box.querySelectorAll('input[data-key]').forEach((el) => {
-    el.addEventListener('change', async () => {
-      const key = el.dataset.key;
-      try {
-        const r = await api('/api/control', {
-          method: 'PATCH',
-          body: JSON.stringify({ [key]: el.checked }),
-        });
-        state.control = r.control;
-        renderSwitches();
-      } catch (e) {
-        alert(`保存失败：${e.message}`);
-        renderSwitches();
-      }
+  box.innerHTML = Object.entries(GROUP_META)
+    .map(([gkey, meta]) => {
+      const fields = FIELD_META[gkey] || {};
+      const rows = Object.entries(fields)
+        .map(([fkey, [label, kind]]) => {
+          const cell = groups[gkey]?.[fkey];
+          if (!cell) return '';
+          const changed = cell.overridden ? ' changed' : '';
+          const badge = cell.overridden
+            ? `<button class="reset-btn" data-g="${gkey}" data-f="${fkey}" title="恢复 config.json 的值">↺ 默认 ${esc(String(cell.base ?? '—'))}</button>`
+            : '';
+          if (kind === 'bool') {
+            return `<label class="set-row${changed}">
+              <input type="checkbox" data-g="${gkey}" data-f="${fkey}" ${cell.value ? 'checked' : ''}>
+              <span class="set-label">${esc(label)}</span>${badge}
+            </label>`;
+          }
+          return `<label class="set-row${changed}">
+            <span class="set-label">${esc(label)}</span>
+            <input type="number" data-g="${gkey}" data-f="${fkey}" value="${esc(String(cell.value ?? ''))}">
+            <span class="unit">${esc(kind)}</span>${badge}
+          </label>`;
+        })
+        .join('');
+      if (!rows) return '';
+      return `<div class="set-group">
+        <div class="set-head"><b>${esc(meta.title)}</b><em>${esc(meta.desc)}</em></div>
+        ${rows}
+      </div>`;
+    })
+    .join('');
+
+  box.querySelectorAll('input[data-f]').forEach((el) => {
+    el.addEventListener('change', () => saveField(el.dataset.g, el.dataset.f, el));
+  });
+  box.querySelectorAll('.reset-btn').forEach((el) => {
+    el.addEventListener('click', (ev) => {
+      ev.preventDefault();
+      saveField(el.dataset.g, el.dataset.f, null);
     });
   });
+}
+
+async function saveField(group, field, el) {
+  const patch = { [group]: {} };
+  if (el === null) {
+    patch[group][field] = null; // 恢复默认
+  } else if (el.type === 'checkbox') {
+    patch[group][field] = el.checked;
+  } else {
+    const n = Number(el.value);
+    if (!Number.isFinite(n)) return renderSwitches();
+    patch[group][field] = n;
+  }
+  try {
+    const r = await api('/api/control', { method: 'PATCH', body: JSON.stringify({ control: patch }) });
+    state.effective = { groups: r.groups };
+    renderSwitches();
+  } catch (e) {
+    alert(`保存失败：${e.message}`);
+    renderSwitches();
+  }
 }
 
 function renderOverview(st) {
@@ -356,9 +437,9 @@ syncThemeBtn();
 async function loadControl() {
   try {
     const r = await api('/api/control');
-    state.control = r.control || {};
+    state.effective = { groups: r.groups };
   } catch {
-    state.control = {};
+    state.effective = null;
   }
   renderSwitches();
 }
