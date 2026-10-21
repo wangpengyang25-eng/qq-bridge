@@ -44,5 +44,7 @@ export function resolvePaths(bridgeDir) {
     bridgeDir: bridge,
     membersFile: path.join(dataDir, 'members.json'),
     overridesFile: path.join(dataDir, 'overrides.json'),
+    // 面板写的运行时开关（bridge 只读）
+    controlFile: path.join(dataDir, 'control.json'),
   };
 }

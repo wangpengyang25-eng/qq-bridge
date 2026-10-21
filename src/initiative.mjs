@@ -76,6 +76,13 @@ export class InitiativeEngine {
     return this.cfg.enabled === true;
   }
 
+  /** 面板上的开关在运行时覆盖配置，缺省（undefined）表示跟随 config.json */
+  setSwitches({ enabled, chime, callout } = {}) {
+    if (typeof enabled === 'boolean') this.cfg.enabled = enabled;
+    if (typeof chime === 'boolean') this.cfg.chime.enabled = chime;
+    if (typeof callout === 'boolean') this.cfg.callout.enabled = callout;
+  }
+
   _group(sceneId) {
     const k = String(sceneId);
     let g = this.groups.get(k);

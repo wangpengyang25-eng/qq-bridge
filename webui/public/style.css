@@ -396,6 +396,36 @@ button.danger { color: var(--rose); }
 .rules b { color: var(--dim); font-weight: 600; }
 .rules code { color: var(--dim); background: var(--surface-2); padding: 1px 5px; border-radius: 4px; }
 
+/* ---------- 功能开关 ---------- */
+.switches { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 8px; padding: 12px; }
+.switch-row {
+  display: flex; align-items: flex-start; gap: 10px;
+  padding: 11px 13px;
+  background: var(--surface-2);
+  border: 1px solid var(--line-soft);
+  border-radius: 10px;
+  cursor: pointer;
+  transition: border-color .15s ease;
+}
+.switch-row:hover { border-color: var(--accent-line); }
+.switch-row.inherit { opacity: .72; }
+.switch-row input { margin-top: 3px; width: 16px; height: 16px; accent-color: var(--accent); cursor: pointer; flex: 0 0 auto; }
+.switch-row .sw-text { display: block; min-width: 0; }
+.switch-row b { display: block; font-size: 13.5px; font-weight: 600; }
+.switch-row em { display: block; font-style: normal; color: var(--dim-2); font-size: 11.5px; line-height: 1.6; margin-top: 2px; }
+
+select {
+  width: 100%;
+  background: var(--sunken);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 9px 12px;
+  font: inherit;
+  cursor: pointer;
+}
+select:focus { outline: none; border-color: var(--accent-line); box-shadow: 0 0 0 3px var(--accent-soft); }
+
 /* ---------- 候选 ---------- */
 .candidates { list-style: none; margin: 0; padding: 10px; display: grid; gap: 7px; }
 .candidates li {

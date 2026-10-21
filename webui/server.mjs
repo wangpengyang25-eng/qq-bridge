@@ -15,7 +15,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readJson, writeJson } from './src/store.mjs';
 import { resolvePaths } from './src/paths.mjs';
-import { summarize, levelOf, nextLevelGap, RULES, LEVELS, proactiveCandidates } from './src/profile.mjs';
+import { summarize, levelOf, nextLevelGap, RULES, LEVELS, proactiveCandidates, BOND_NAMES } from './src/profile.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(HERE, 'public');
@@ -34,6 +34,7 @@ const PATHS = resolvePaths(argOf('--bridge'));
 const BRIDGE_DIR = PATHS.bridgeDir;
 const MEMBERS_FILE = PATHS.membersFile;   // bridge 独占写入，面板只读
 const OVERRIDES_FILE = PATHS.overridesFile; // 面板独占写入
+const CONTROL_FILE = PATHS.controlFile;   // 面板独占写入（bridge 只读）
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -69,6 +70,7 @@ function loadAll() {
       affinity,
       note: typeof ov.note === 'string' ? ov.note : '',
       muted: ov.muted === true,
+      bond: typeof ov.bond === 'string' ? ov.bond : '', // 满级之后的具体关系称号
       affinityPinned: pinned, // 界面用来标"这个分数是手改的"
       level: levelOf(affinity),
       next: nextLevelGap(affinity),
@@ -76,6 +78,28 @@ function loadAll() {
   });
 
   return { members: merged, updatedAt: doc.updatedAt ?? null };
+}
+
+/** 读面板自己的开关文件；文件不存在时返回空对象（= 全部跟随 config.json） */
+function loadControl() {
+  const doc = readJson(CONTROL_FILE, { version: 1, control: {} });
+  const c = doc?.control && typeof doc.control === 'object' ? doc.control : {};
+  const out = {};
+  for (const k of ['initiative', 'chime', 'callout', 'stickerReply']) {
+    if (typeof c[k] === 'boolean') out[k] = c[k];
+  }
+  return out;
+}
+
+async function saveControl(patch) {
+  const doc = readJson(CONTROL_FILE, { version: 1, control: {} });
+  if (!doc.control || typeof doc.control !== 'object') doc.control = {};
+  for (const k of ['initiative', 'chime', 'callout', 'stickerReply']) {
+    if (typeof patch[k] === 'boolean') doc.control[k] = patch[k];
+  }
+  doc.updatedAt = Date.now();
+  await writeJson(CONTROL_FILE, doc);
+  return loadControl();
 }
 
 /** 只写 overrides.json（bridge 不看这个文件，只有面板用） */
@@ -91,6 +115,12 @@ async function saveOverride(qq, patch) {
   }
   if (typeof patch.note === 'string') cur.note = patch.note.slice(0, 500);
   if (typeof patch.muted === 'boolean') cur.muted = patch.muted;
+  // 关系称号：空字符串表示取消
+  if (typeof patch.bond === 'string') {
+    const b = patch.bond.trim();
+    if (!b) delete cur.bond;
+    else if (BOND_NAMES.includes(b)) cur.bond = b;
+  }
 
   cur.at = Date.now();
   doc.overrides[qq] = cur;
@@ -182,11 +212,23 @@ const server = http.createServer(async (req, res) => {
         bridgeConnected: !!BRIDGE_DIR,
         membersFile: MEMBERS_FILE,
         overridesFile: OVERRIDES_FILE,
+        controlFile: CONTROL_FILE,
         node: process.version,
         platform: `${process.platform} ${process.arch}`,
         rules: RULES,
         levels: LEVELS,
+        bonds: BOND_NAMES, // 满级之后可选的关系称号
       });
+    }
+
+    if (p === '/api/control' && req.method === 'GET') {
+      return json(res, 200, { control: loadControl(), file: CONTROL_FILE });
+    }
+
+    if (p === '/api/control' && (req.method === 'PATCH' || req.method === 'POST')) {
+      const body = await readBody(req);
+      const next = await saveControl(body || {});
+      return json(res, 200, { ok: true, control: next });
     }
 
     if (p === '/api/config') {

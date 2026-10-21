@@ -175,19 +175,47 @@ export const LEVEL_GUIDE = {
 };
 
 /**
+ * 满级之后的具体关系称号。分数只到"挚友"，再往上是什么关系由人自己定，
+ * 因为"是闺蜜还是恋人"不是算出来的，是两个人之间的事。
+ */
+export const BONDS = {
+  闺蜜: '你们是无话不谈的闺蜜 —— 可以八卦、可以撒娇、可以说悄悄话，也可以忽然正经',
+  恋人: '你们是恋人 —— 可以亲昵、可以想念、可以吃醋，但别腻得发假',
+  亲子: '你把他当自家孩子照顾 —— 语气要温柔，会唠叨吃饭睡觉，会替他操心',
+  损友: '你们是互相拆台的损友 —— 越熟越能开涮，但底线是都知道对方不会真生气',
+  搭档: '你们是长期搭档 —— 说话直接、默契、不用说客套话',
+};
+
+/** 能挂上的关系称号列表（给面板下拉用） */
+export const BOND_NAMES = Object.keys(BONDS);
+
+/**
  * 生成"你和这个人的关系"提示块，注入到本轮消息里。
  *
  * 注意**不要**放进 system：system 是稳定前缀，动它会连累整段历史的缓存命中。
- * 这里只放等级（5 档，变化很慢）而不是具体分数（每条消息都在变），
- * 免得同一段对话里前缀一直抖。
+ * 这里放在消息尾部，所以带上具体分数不会影响缓存 —— 分数能让语气变化更细腻。
+ *
+ * @param {object} m 成员档案（可能来自 members.json）
+ * @param {object} [over] 面板上的覆盖值（备注 / 手改的亲密度 / 关系称号）
  */
-export function relationLine(m, { maxNote = 60 } = {}) {
-  if (!m) return '';
-  const level = levelOf(m.affinity || 0);
-  const lines = [`【你和他现在的关系】${level.name} —— ${LEVEL_GUIDE[level.key]}`];
-  const s = m.stats || {};
+export function relationLine(m, over = {}) {
+  const { maxNote = 60 } = over;
+  const hasManual = Number.isFinite(over.affinity);
+  const eff = hasManual ? over.affinity : m?.affinity || 0;
+  if (!m && !hasManual) return '';
+
+  const level = levelOf(eff);
+  const lines = [`【你和他现在的关系】${level.name}（亲密度 ${Math.round(eff)}/100）—— ${LEVEL_GUIDE[level.key]}`];
+
+  const bond = over.bond;
+  if (bond && BONDS[bond]) lines.push(`【你们的关系】${BONDS[bond]}`);
+
+  const s = m?.stats || {};
   if (s.messages) lines.push(`你们聊过 ${s.messages} 句，他被你叫过 ${s.ats || 0} 次`);
-  if (m.note) lines.push(`【你记得关于他的事】${String(m.note).slice(0, maxNote)}`);
+
+  const note = over.note ?? m?.note;
+  if (note) lines.push(`【你记得关于他的事】${String(note).slice(0, maxNote)}`);
+
   return lines.join('\n');
 }
 

@@ -1368,6 +1368,44 @@ async function main() {
       }
       check('配置：带 BOM 的 config.json 也能读', ok);
     }
+
+    // ---- 面板上的编辑必须真的进到提示词 ----
+    {
+      const base = createMember('2002', '王卫星', Date.now());
+      base.affinity = 5; // 自动算出来的很低
+
+      const withNote = relationLine(base, { note: '唯一的儿子，需要陪伴' });
+      check('覆盖：备注能进关系台词（即便成员档案里没有）', withNote.includes('唯一的儿子'));
+
+      const withAff = relationLine(base, { affinity: 95 });
+      check('覆盖：手改的亲密度生效（5 → 95 变成挚友）', withAff.includes('挚友'), withAff.split('\n')[0]);
+      check('覆盖：台词里带上具体分数', withAff.includes('95/100'), withAff.split('\n')[0]);
+
+      const withBond = relationLine(base, { affinity: 95, bond: '恋人' });
+      check('覆盖：关系称号进入提示词', withBond.includes('恋人'), withBond);
+      check('覆盖：称号附带的说话指引也在', withBond.includes('亲昵'));
+
+      check('覆盖：无称号时不出现"你们的关系"这一行', !relationLine(base, { affinity: 95 }).includes('【你们的关系】'));
+      check('覆盖：非法称号被忽略而不是崩', !relationLine(base, { bond: '随便写的' }).includes('随便写的'));
+    }
+
+    // ---- 面板开关文件 ----
+    {
+      const { createControlReader } = await import('./src/control.mjs');
+      const cf = path.join(TMP, 'control-test.json');
+      const read0 = createControlReader(cf);
+      check('开关：文件不存在时返回空（全部跟随 config）', Object.keys(read0().values).length === 0);
+
+      fs.writeFileSync(cf, JSON.stringify({ control: { stickerReply: false, chime: true, junk: 1 } }), 'utf8');
+      const read1 = createControlReader(cf);
+      const v = read1().values;
+      check('开关：读得到布尔开关', v.stickerReply === false && v.chime === true, JSON.stringify(v));
+      check('开关：未知字段被忽略', !('junk' in v));
+
+      fs.writeFileSync(cf, '{ 坏掉的 JSON', 'utf8');
+      const read2 = createControlReader(cf);
+      check('开关：坏文件不抛错', typeof read2().values === 'object');
+    }
   }
 
   const failed = results.filter((r) => !r.ok);

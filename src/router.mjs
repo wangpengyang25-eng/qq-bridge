@@ -16,6 +16,7 @@ import { StickerLibrary } from './stickers.mjs';
 import { MemberStore } from './members.mjs';
 import { InitiativeEngine } from './initiative.mjs';
 import { createOverrideReader } from './overrides.mjs';
+import { createControlReader } from './control.mjs';
 import { StickerSense, decideStickerReply, pickReplyMood } from './stickersense.mjs';
 import { relationLine, levelOf } from './profile.mjs';
 
@@ -114,6 +115,10 @@ export class Router {
     // 默认全关（cfg.proactive.initiative.enabled），要显式打开。
     this.readOverrides = createOverrideReader(
       cfg.members?.overridesFile || path.resolve(cfg.__dir || '.', 'data/overrides.json')
+    );
+    // 面板上的功能开关（运行时可改，不用重启）
+    this.readControl = createControlReader(
+      cfg.controlFile || path.resolve(cfg.__dir || '.', 'data/control.json')
     );
     this.initiative = new InitiativeEngine({
       cfg: cfg.proactive?.initiative,
@@ -750,6 +755,8 @@ export class Router {
   // 这条是看到群友甩图之后，认出情绪再挑一张对着回。
   // 回图不调对话模型，只可能有一次视觉识别调用（且结果会缓存）。
   async maybeStickerReply(evt) {
+    // 面板上关掉就立刻生效（不用重启）
+    if (this.readControl().values.stickerReply === false) return null;
     const rc = this.cfg.stickers?.reply;
     if (!rc?.enabled || !this.stickerSense) return null;
     if (!evt?.hasSticker || !evt?.stickerUrls?.length) return null;
@@ -781,8 +788,12 @@ export class Router {
 
     // 不是复读同一个情绪：收到「难过」回「加油」才叫读懂了。
     // 回哪个还跟关系有关 —— 对熟人回得更热络，对刚认识的回得更克制。
+    // 这里用的是**生效后**的亲密度（面板手改过的优先），不是自动算的那个。
     const member = this.members ? this.members.get(evt.userId) : null;
-    const levelKey = member ? levelOf(member.affinity || 0).key : 'lv2';
+    const ovForLevel = this.readOverrides();
+    const uid = String(evt.userId || '');
+    const effAffinity = ovForLevel.affinity.has(uid) ? ovForLevel.affinity.get(uid) : member?.affinity || 0;
+    const levelKey = levelOf(effAffinity).key;
     const replyMood = pickReplyMood(felt.mood, levelKey, this.stickers.moods(), Math.random) || felt.mood;
     const pick = this.stickers.pick(replyMood);
     if (!pick.ok) return null;
@@ -821,7 +832,6 @@ export class Router {
           userName: evt.userName || '',
           maxParts: 1,
           lockKey: `${evt.scene || 'group'}:${sceneId}:sticker`,
-          relation: relationLine(member),
           proactive: true,
           sender: (t) =>
             evt.scene === 'private'
@@ -864,9 +874,9 @@ export class Router {
   // 真正的消息发送仍然复用 answer()，人设/表情包/工具都跟着走。
 
   startInitiative() {
-    if (!this.initiative.enabled) return false;
     if (this.initiativeTimer) return true;
-
+    // 即使当前是关的也起定时器：面板上随时可能打开，等 30 秒一次的评估很便宜，
+    // 真正花钱的是 tick 之后真的开口那一步。
     const every = Math.max(1000, Number(this.cfg.proactive?.initiative?.scanEveryMs) || 60000);
     this.initiativeTimer = setInterval(() => {
       this.runInitiative().catch((e) => log(`[router] 主动发起异常：${e.message}`));
@@ -889,6 +899,9 @@ export class Router {
    */
   async runInitiative(now = Date.now()) {
     if (!this.state.enabled) return null; // 总开关断着就不主动开口
+    // 面板开关优先于 config.json（缺省表示跟随配置）
+    const ctl = this.readControl().values;
+    this.initiative.setSwitches({ enabled: ctl.initiative, chime: ctl.chime, callout: ctl.callout });
     const action = this.initiative.tick(now);
     if (!action) return null;
 
@@ -956,12 +969,19 @@ export class Router {
       // 关系块：没显式传就按当前说话的人去查。
       // 所有回复（群聊、私聊、主动发起、表情包配文）都会自动带上，
       // 所以"对她说话的语气跟好感度挂钩"不需要在每个调用点重复写。
-      const rel =
-        relation === undefined
-          ? this.members
-            ? relationLine(this.members.get(evt?.userId))
-            : ''
-          : relation;
+      // 面板上的备注 / 手改的亲密度 / 关系称号都以 overrides 为准。
+      let rel;
+      if (relation !== undefined) {
+        rel = relation;
+      } else {
+        const qq = String(evt?.userId || '');
+        const ov = this.readOverrides();
+        rel = relationLine(this.members ? this.members.get(qq) : null, {
+          note: ov.notes.get(qq),
+          affinity: ov.affinity.get(qq),
+          bond: ov.bonds.get(qq),
+        });
+      }
 
       if (!this.cfg.llm.apiKey) {
         await sender('（还没配置模型 API Key，暂时回答不了。请联系管理员。）');

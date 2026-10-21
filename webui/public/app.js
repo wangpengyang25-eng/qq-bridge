@@ -12,6 +12,8 @@ const state = {
   stats: null,
   levels: [],
   rules: null,
+  bonds: [],
+  control: {},
   selected: null,
   sort: 'affinity',
 };
@@ -61,6 +63,48 @@ function renderStatus(s) {
   $('#env').textContent = `Node ${s.node} · ${s.platform}`;
   state.levels = s.levels;
   state.rules = s.rules;
+  state.bonds = s.bonds || [];
+}
+
+// 功能开关：改动立刻写 data/control.json，bridge 3 秒内读到
+const SWITCHES = [
+  { key: 'stickerReply', name: '表情包回应', desc: '群友发表情包时认出情绪并回一张' },
+  { key: 'initiative', name: '主动发起（总）', desc: '没人说话也会自己开口的总开关' },
+  { key: 'chime', name: '冷场接话', desc: '群里安静一阵后，接一句刚才的话题' },
+  { key: 'callout', name: '按人点名', desc: '主动 @ 某个该联系的人（社交压力最大）' },
+];
+
+function renderSwitches() {
+  const box = $('#switches');
+  box.innerHTML = SWITCHES.map((s) => {
+    const v = state.control[s.key];
+    const on = v === true;
+    const unknown = v === undefined;
+    return `<label class="switch-row ${unknown ? 'inherit' : ''}">
+      <input type="checkbox" data-key="${s.key}" ${on ? 'checked' : ''}>
+      <span class="sw-text">
+        <b>${esc(s.name)}</b>
+        <em>${esc(s.desc)}${unknown ? ' · 跟随 config.json' : ''}</em>
+      </span>
+    </label>`;
+  }).join('');
+
+  box.querySelectorAll('input[data-key]').forEach((el) => {
+    el.addEventListener('change', async () => {
+      const key = el.dataset.key;
+      try {
+        const r = await api('/api/control', {
+          method: 'PATCH',
+          body: JSON.stringify({ [key]: el.checked }),
+        });
+        state.control = r.control;
+        renderSwitches();
+      } catch (e) {
+        alert(`保存失败：${e.message}`);
+        renderSwitches();
+      }
+    });
+  });
 }
 
 function renderOverview(st) {
@@ -190,6 +234,16 @@ function renderDetail(m) {
       <span>不要主动找这个人说话</span>
     </label>
 
+    <label class="field" style="margin-top:16px">
+      <span>关系称号 · 满级之后你们具体是什么关系（会直接影响她说话的方式）</span>
+      <select id="bondSelect">
+        <option value="">未指定（只说"挚友"）</option>
+        ${state.bonds
+          .map((b) => `<option value="${esc(b)}" ${m.bond === b ? 'selected' : ''}>${esc(b)}</option>`)
+          .join('')}
+      </select>
+    </label>
+
     <div class="rules">
       <b>亲密度怎么算的</b><br>
       被 @ 一次 <code>+${r.atScore ?? '?'}</code>；普通发言 <code>+${r.messageScore ?? '?'}</code>，
@@ -205,6 +259,7 @@ function renderDetail(m) {
   $('#resetAffinity').addEventListener('click', () => {
     if (confirm(`把 ${m.nick} 的亲密度清零？`)) patch(m.qq, { affinity: 0 });
   });
+  $('#bondSelect').addEventListener('change', (e) => patch(m.qq, { bond: e.target.value }));
 }
 
 function renderCandidates(list) {
@@ -298,9 +353,20 @@ $('#themeBtn').addEventListener('click', () => {
 
 syncThemeBtn();
 
+async function loadControl() {
+  try {
+    const r = await api('/api/control');
+    state.control = r.control || {};
+  } catch {
+    state.control = {};
+  }
+  renderSwitches();
+}
+
 (async function main() {
   try {
     renderStatus(await api('/api/status'));
+    await loadControl();
     await loadMembers();
     await loadCandidates();
   } catch (e) {
