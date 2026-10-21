@@ -362,7 +362,7 @@ function renderDetail(m) {
     </label>
 
     <label class="field" style="margin-top:16px">
-      <span>关系称号 · 满级之后你们具体是什么关系（会直接影响她说话的方式）</span>
+      <span>关系称号 · 你们现在是什么关系（会直接影响她说话的方式）</span>
       <select id="bondSelect">
         <option value="">未指定（只说"挚友"）</option>
         ${bondOpts}
