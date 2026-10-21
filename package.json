@@ -1,0 +1,17 @@
+{
+  "name": "qq-bridge",
+  "version": "0.1.0",
+  "description": "把 AI 助手接到 QQ 群：被 @ 才回答，管理员私聊随时接入 / 断开。零第三方依赖。",
+  "main": "bridge.mjs",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node bridge.mjs",
+    "test": "node selftest.mjs",
+    "probe:onebot": "node probe_onebot.mjs",
+    "probe:llm": "node probe_llm.mjs",
+    "probe:vision": "node probe_vision.mjs",
+    "probe:stickers": "node probe_stickers.mjs"
+  }
+}

@@ -1,0 +1,30 @@
+# ── 本地配置与状态：含 API Key 和 QQ 号，绝对不能提交 ──
+config.json
+state.json
+
+# ── 运行时产物 ──
+logs/
+*.log
+# 自测每次运行都会在这里生成配置和桩数据（带随机端口），不是源码
+.selftest/
+
+# ── 第三方与本机工具链 ──
+# NapCat 是别人写的注入程序，单独下载，不属于本仓库
+napcat/
+node_modules/
+
+# ── 个人记忆与截图（WorkBuddy 生成，含聊天内容）──
+.workbuddy/
+.wbapp_*
+
+# ── 表情包图片：版权归原作者，仓库只保留清单和命名规范 ──
+# 想把自己收集的表情包一起公开，就删掉下面四行
+stickers/04-线条狗/*.png
+stickers/04-线条狗/*.jpg
+stickers/04-线条狗/*.gif
+stickers/04-线条狗/*.webp
+
+# ── 系统垃圾 ──
+Thumbs.db
+desktop.ini
+.DS_Store

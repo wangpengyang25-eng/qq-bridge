@@ -1,0 +1,881 @@
+// 端到端自测：用假的 NapCat(OneBot) 服务端 + 假的模型接口，把 bridge.mjs 真跑一遍
+// 用法：node selftest.mjs
+//
+// 覆盖点：
+//   1  连接、get_login_info、就绪
+//   2  群 @ 触发回答，Markdown 清洗成纯文本，回复带 @ 与引用
+//   3  今天日期已注入 system（不用联网问日期）
+//   4  首个私聊者自动绑定为管理员
+//   5  管理指令 /status 各字段
+//   6  私聊 /off 断开
+//   7  断开后群里完全静默
+//   8  私聊 /on 恢复
+//   9  非管理员私聊被忽略
+//  10  群聊被动上下文：非 @ 消息只记录不出声，@ 时按需注入背景（含相对时间）
+//  10b 主动插话：提到名字但没 @ 也能接一句、不带 @/引用、冷却生效、闲聊不插
+//  10c 用量统计：usage（含前缀缓存命中率）落到日志
+//  11  工具闭环：calc / time_diff / random / fetch_url（内网必须被拦）/
+//      send_sticker（表情图片 + 无节流 + /sticker 指令）
+//  12  长回复分片且不超过条数上限
+//  13  断线自动重连
+//  14  /ctx 查看与清空群聊背景
+//  15  频率限制
+//  16  纯函数回归：会话隔离 / 图片提取 / 搜索解析 / 计算器 / 日期 / 随机 /
+//      读网页安全门禁与正文提取 / 搜索谓词 / 背景按需判定 / 相对时间 /
+//      分段规则 / 表情库（匹配、取图、无节流、回退）/ 难度判定 / 摘要压缩 /
+//      背景过滤 / few-shot 加载
+//  17  首次连接失败不得导致进程退出（回归）
+import http from 'node:http';
+import net from 'node:net';
+import path from 'node:path';
+import fs from 'node:fs';
+import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { wsServe } from './src/ws.mjs';
+import {
+  sessionKey,
+  summarizeLocal,
+  getContext,
+  pushHistory,
+  clearHistory,
+  classifyDifficulty,
+  searchPredicate,
+} from './src/llm.mjs';
+import { extractContent } from './src/onebot.mjs';
+import { loadConfig } from './src/config.mjs';
+import { parseBing } from './src/search.mjs';
+import { evaluateExpression } from './src/calc.mjs';
+import { computeTimeDiff, parseDateLoose, dayDiff } from './src/datetime.mjs';
+import { rollDice, pickOne, randomInt } from './src/random.mjs';
+import { htmlToText, extractTitle, isBlockedIp, isBlockedHost } from './src/fetchpage.mjs';
+import { AmbientBuffer, isFiller, needBackground, relTime } from './src/ambient.mjs';
+import { splitMessage } from './src/text.mjs';
+import { StickerLibrary } from './src/stickers.mjs';
+
+/** 1×1 的合法 PNG，用作测试表情包素材 */
+const PNG_1X1 = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+  'base64'
+);
+
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const TMP = path.join(HERE, '.selftest');
+const LOGIN_ID = 1000000001; // 假机器人自己的 QQ 号
+const ADMIN_ID = 1000000002;
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function waitFor(fn, { timeout = 10000, interval = 80, label = '条件' } = {}) {
+  const t0 = Date.now();
+  for (;;) {
+    if (await fn()) return true;
+    if (Date.now() - t0 > timeout) throw new Error(`等待超时：${label}`);
+    await sleep(interval);
+  }
+}
+
+// ---------------- 断言 ----------------
+const results = [];
+function check(name, cond, extra = '') {
+  const ok = !!cond;
+  results.push({ name, ok });
+  console.log(`${ok ? '  ✔' : '  ✘'} ${name}${extra ? '   [' + extra + ']' : ''}`);
+}
+
+// ---------------- 假模型接口 ----------------
+const REPLY_MD = '**你好**，这是测试回复。\n\n- 第一点\n- 第二点';
+const REPLY_SHORT = '好。'; // 单段回复，用于数消息条数的用例
+const REPLY_LONG = '这是一段较长的回答。'.repeat(120); // 约 1200 字，会触发分片
+const llmReqs = [];
+let llmMode = 'md'; // md | short | long | calc | time | random | fetch | sticker
+
+/** 各模式让模型"请求"哪个工具，以及拿到工具结果后回什么 */
+const TOOL_PLAN = {
+  calc: { call: { name: 'calc', arguments: '{"expression":"1234*0.15"}' }, after: '算出来是 185.1 呀～' },
+  time: { call: { name: 'time_diff', arguments: '{"to":"明天"}' }, after: '就剩 1 天咯～' },
+  random: { call: { name: 'random', arguments: '{"dice":"3d6"}' }, after: '摇好啦～' },
+  fetch: { call: { name: 'fetch_url', arguments: '{"url":"http://127.0.0.1:9999/secret"}' }, after: '这个读不到～' },
+  sticker: { call: { name: 'send_sticker', arguments: '{"mood":"大笑"}' }, after: '哈哈哈笑死我了～' },
+};
+
+function json(res, o) {
+  res.writeHead(200, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify(o));
+}
+
+const api = http.createServer((req, res) => {
+  let raw = '';
+  req.on('data', (d) => (raw += d));
+  req.on('end', () => {
+    const u = req.url || '';
+    if (u.endsWith('/chat/completions')) {
+      let body = {};
+      try {
+        body = JSON.parse(raw || '{}');
+      } catch {
+        /* 忽略 */
+      }
+      llmReqs.push(body);
+      const msgs = Array.isArray(body.messages) ? body.messages : [];
+      const hasToolResult = msgs.some((m) => m.role === 'tool');
+      const plan = TOOL_PLAN[llmMode];
+      const usage = {
+        prompt_tokens: 100,
+        completion_tokens: 20,
+        total_tokens: 120,
+        prompt_cache_hit_tokens: 80,
+        prompt_cache_miss_tokens: 20,
+      };
+      if (plan && !hasToolResult) {
+        return json(res, {
+          choices: [
+            {
+              finish_reason: 'tool_calls',
+              message: {
+                role: 'assistant',
+                content: '',
+                tool_calls: [{ id: 'call_1', type: 'function', function: plan.call }],
+              },
+            },
+          ],
+          usage,
+        });
+      }
+      const content =
+        llmMode === 'long' ? REPLY_LONG : llmMode === 'short' ? REPLY_SHORT : plan ? plan.after : REPLY_MD;
+      return json(res, { choices: [{ message: { role: 'assistant', content } }], usage });
+    }
+    res.writeHead(404, { 'Content-Type': 'application/json' });
+    res.end('{}');
+  });
+});
+
+/** 最后一条发给模型的 user 消息的纯文本 */
+function lastUserText() {
+  for (let i = llmReqs.length - 1; i >= 0; i -= 1) {
+    const msgs = llmReqs[i].messages || [];
+    for (let j = msgs.length - 1; j >= 0; j -= 1) {
+      if (msgs[j].role !== 'user') continue;
+      const c = msgs[j].content;
+      if (typeof c === 'string') return c;
+      if (Array.isArray(c)) return c.filter((x) => x.type === 'text').map((x) => x.text).join('');
+    }
+  }
+  return '';
+}
+function firstSystemText() {
+  for (const r of llmReqs) {
+    const m = (r.messages || [])[0];
+    if (m && m.role === 'system') return String(m.content);
+  }
+  return '';
+}
+
+// ---------------- 假 NapCat(OneBot) 服务端 ----------------
+let sentGroup = [];
+let sentPrivate = [];
+let obConn = null;
+let obReady = false;
+let msgSeq = 0;
+
+async function startOneBotMock() {
+  return wsServe((conn) => {
+    obConn = conn;
+    conn.on('error', () => {
+      /* 测试收尾阶段的连接重置，忽略 */
+    });
+    conn.on('message', (raw) => {
+      let p;
+      try {
+        p = JSON.parse(raw);
+      } catch {
+        return;
+      }
+      const ok = (data) => conn.send(JSON.stringify({ status: 'ok', retcode: 0, data, echo: p.echo }));
+      if (p.action === 'get_login_info') {
+        obReady = true;
+        ok({ user_id: LOGIN_ID, nickname: '假机器人' });
+      } else if (p.action === 'send_group_msg') {
+        sentGroup.push(p.params);
+        ok({ message_id: sentGroup.length });
+      } else if (p.action === 'send_private_msg') {
+        sentPrivate.push(p.params);
+        ok({ message_id: 9000 + sentPrivate.length });
+      } else {
+        ok({});
+      }
+    });
+  });
+}
+
+function pushGroup({ groupId = 12345, userId = 67890, name = '群友', text = '', at = false, images = [] } = {}) {
+  const message = [];
+  if (at) message.push({ type: 'at', data: { qq: String(LOGIN_ID) } });
+  message.push({ type: 'text', data: { text } });
+  for (const u of images) message.push({ type: 'image', data: { url: u } });
+  msgSeq += 1;
+  obConn.send(
+    JSON.stringify({
+      post_type: 'message',
+      message_type: 'group',
+      group_id: groupId,
+      user_id: userId,
+      message_id: 500 + msgSeq,
+      self_id: LOGIN_ID,
+      sender: { card: name, nickname: name },
+      message,
+    })
+  );
+}
+
+function pushPrivate({ userId = ADMIN_ID, text = '' } = {}) {
+  msgSeq += 1;
+  obConn.send(
+    JSON.stringify({
+      post_type: 'message',
+      message_type: 'private',
+      user_id: userId,
+      message_id: 800 + msgSeq,
+      self_id: LOGIN_ID,
+      sender: { nickname: '管理员' },
+      message: [{ type: 'text', data: { text } }],
+    })
+  );
+}
+
+const segText = (params) => (params.message || []).filter((s) => s.type === 'text').map((s) => s.data.text).join('');
+const hasSeg = (params, type) => (params.message || []).some((s) => s.type === type);
+
+// ---------------- 启动一个 bridge ----------------
+function startBridge(name, cfgObj) {
+  const cfgPath = path.join(TMP, `config-${name}.json`);
+  fs.writeFileSync(cfgPath, JSON.stringify(cfgObj, null, 2));
+  let out = '';
+  const proc = spawn(process.execPath, [path.join(HERE, 'bridge.mjs')], {
+    env: { ...process.env, QQ_BRIDGE_CONFIG: cfgPath },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  proc.stdout.on('data', (d) => (out += d.toString()));
+  proc.stderr.on('data', (d) => (out += d.toString()));
+  return { proc, log: () => out };
+}
+
+function mkCfg(apiPort, wsPort, over = {}) {
+  const base = {
+    transport: 'onebot',
+    onebot: { wsUrl: `ws://127.0.0.1:${wsPort}`, reconnectBaseMs: 300, reconnectMaxMs: 2000 },
+    bot: { admins: [], allowedGroups: [], replyWithQuote: true },
+    mode: { enabledOnStart: true, requireAt: true, groupShareContext: true },
+    limits: { enabled: false }, // 功能用例里关限流，限流单独验证
+    llm: {
+      systemPromptFile: '', // 测试目录没有 persona.txt，关掉文件加载
+      fewShotFile: '', // 测试目录没有 fewshot/，同样关掉
+      baseUrl: `http://127.0.0.1:${apiPort}/v1`,
+      apiKey: 'mock-key',
+      model: 'mock-model',
+      timeoutMs: 10000,
+      historyLimit: 12,
+      historyCompactAt: 24,
+      systemPrompt: '你是测试助手',
+    },
+    ambient: { enabled: true, smartInject: true, maxKeep: 30, injectItems: 8, injectMaxChars: 500, minLen: 2 },
+    stickers: { enabled: true, dir: 'stickers', activeSet: '测试套', position: 'after' },
+    // 主动插话：测试里开着，触发词用机器人昵称，冷却 60s 便于验证"连着叫不会连插"
+    proactive: {
+      enabled: true,
+      names: ['假机器人'],
+      onQuestion: false,
+      minIntervalMs: 60000,
+      dailyLimit: 100,
+      windowMs: 600000,
+      minActivity: 1,
+    },
+    calc: { enabled: true },
+    search: { enabled: true, maxResults: 5, cooldownMs: 15000, maxRoundsPerReply: 2 },
+    output: { maxCharsPerMessage: 900, maxPartsGroup: 5, maxPartsPrivate: 4 },
+    logFile: 'logs/selftest.log',
+    stateFile: 'state.json',
+  };
+  return { ...base, ...over };
+}
+
+// ---------------- 主流程 ----------------
+async function main() {
+  fs.rmSync(TMP, { recursive: true, force: true });
+  fs.mkdirSync(TMP, { recursive: true });
+
+  // 造一套测试用表情包素材（两个情绪，各一张 1×1 PNG）
+  {
+    const sd = path.join(TMP, 'stickers', '测试套');
+    fs.mkdirSync(sd, { recursive: true });
+    fs.writeFileSync(path.join(sd, '大笑.png'), PNG_1X1);
+    fs.writeFileSync(path.join(sd, '卖萌.png'), PNG_1X1);
+  }
+
+  const ws = await startOneBotMock();
+  await new Promise((r) => api.listen(0, '127.0.0.1', () => r()));
+  const apiPort = api.address().port;
+
+  const bridge = startBridge('main', mkCfg(apiPort, ws.port));
+
+  try {
+    console.log('\n--- 1. 连接与就绪 ---');
+    await waitFor(() => obConn && obReady, { label: 'bridge 完成 get_login_info' });
+    await sleep(300);
+    check('OneBot 连接 + get_login_info 成功', obReady);
+
+    console.log('\n--- 2. 群 @ 触发回答 ---');
+    pushGroup({ text: '你好', at: true, name: '群友甲' });
+    await waitFor(() => sentGroup.length > 0, { label: '群消息回复' });
+    const g1 = sentGroup[0];
+    check('群 @ 触发模型回答', sentGroup.length > 0);
+    check(
+      'Markdown 已清洗为纯文本',
+      segText(g1).includes('你好，这是测试回复。') && !segText(g1).includes('**'),
+      segText(g1).slice(0, 40)
+    );
+    check('回复里 @ 了提问者', hasSeg(g1, 'at'));
+    check('回复引用了原消息', hasSeg(g1, 'reply'));
+    check(
+      '背景按需注入：自足的问题不带群聊背景',
+      !lastUserText().includes('【群里刚才聊到'),
+      lastUserText().split('\n')[0].slice(0, 34)
+    );
+
+    console.log('\n--- 3. 今天日期已注入 system ---');
+    const sys1 = firstSystemText();
+    check('system 里带有今天日期', /今天日期：\d{4}-\d{2}-\d{2} 星期[日一二三四五六]。/.test(sys1), sys1.slice(-28));
+    check('日期行追加在人设之后（前缀仍然稳定）', sys1.startsWith('你是测试助手'), sys1.slice(0, 12));
+
+    console.log('\n--- 4. 首个私聊者自动绑定为管理员 ---');
+    pushPrivate({ text: '你好' });
+    await waitFor(() => sentPrivate.some((x) => segText(x).includes('绑定为管理员')), { label: '绑定提示' });
+    check('首个私聊者自动绑定为管理员', sentPrivate.some((x) => segText(x).includes('绑定为管理员')));
+
+    console.log('\n--- 5. 管理指令 /status ---');
+    const beforeStatus = sentPrivate.length;
+    pushPrivate({ text: '/status' });
+    await waitFor(() => sentPrivate.length > beforeStatus, { label: '/status 回复' });
+    const st = segText(sentPrivate[sentPrivate.length - 1]);
+    check('/status 返回当前状态', st.includes('已接入') && st.includes('mock-model'), st.split('\n')[0]);
+    check('  · 展示群聊背景开关', st.includes('群聊背景：开'), (st.split('\n').find((l) => l.startsWith('群聊背景')) || '').slice(0, 30));
+    check('  · 展示模型档位', st.includes('模型档位：自适应'), (st.split('\n').find((l) => l.startsWith('模型档位')) || '').slice(0, 30));
+    check('  · 展示工具开关', st.includes('工具：') && st.includes('计算器开') && st.includes('读网页开'), (st.split('\n').find((l) => l.startsWith('工具：')) || '').slice(0, 40));
+    check('  · 展示按需注入与跳过次数', st.includes('按需注入：开'), (st.split('\n').find((l) => l.startsWith('群聊背景')) || '').slice(0, 40));
+    check('  · 展示主动插话开关', st.includes('主动插话：'), (st.split('\n').find((l) => l.startsWith('主动插话')) || '').slice(0, 40));
+    check(
+      '  · 展示 token 用量与前缀缓存命中率',
+      /用量（本次运行）：输入 \d+/.test(st),
+      (st.split('\n').find((l) => l.startsWith('用量')) || '').slice(0, 70)
+    );
+
+    console.log('\n--- 6. 私聊 /off 断开 ---');
+    pushPrivate({ text: '/off' });
+    await waitFor(() => sentPrivate.some((x) => segText(x).includes('已断开')), { label: '/off 回复' });
+    check('/off 生效并确认', true);
+
+    console.log('\n--- 7. 断开后群聊完全静默 ---');
+    const beforeSilent = sentGroup.length;
+    pushGroup({ text: '在吗', at: true });
+    await sleep(1200);
+    check('断开状态下群里没有任何回应', sentGroup.length === beforeSilent, `消息数 ${beforeSilent} -> ${sentGroup.length}`);
+
+    console.log('\n--- 8. 私聊 /on 恢复 ---');
+    pushPrivate({ text: '/on' });
+    await waitFor(() => sentPrivate.some((x) => segText(x).includes('已接入。群里')), { label: '/on 回复' });
+    const beforeResume = sentGroup.length;
+    pushGroup({ text: '恢复了吗', at: true });
+    await waitFor(() => sentGroup.length > beforeResume, { label: '恢复后的群回复' });
+    check('恢复后群聊重新响应', true);
+
+    console.log('\n--- 9. 非管理员私聊被忽略 ---');
+    const beforeStranger = sentPrivate.length;
+    pushPrivate({ text: '/off', userId: 999888777 });
+    await sleep(1200);
+    check('非管理员私聊被静默忽略', sentPrivate.length === beforeStranger, `消息数 ${beforeStranger} -> ${sentPrivate.length}`);
+
+    console.log('\n--- 10. 群聊被动上下文 ---');
+    const beforeAmbient = sentGroup.length;
+    pushGroup({ text: '咱们那个 7116 充电器项目要改成双通道', name: '老王' });
+    pushGroup({ text: '温度保护也得一起加上', name: '小李' });
+    await sleep(400);
+    check('非 @ 消息只记录、不出声', sentGroup.length === beforeAmbient, `消息数 ${beforeAmbient} -> ${sentGroup.length}`);
+    pushGroup({ text: '那个方案靠谱吗', at: true, name: '群友乙' });
+    await waitFor(() => sentGroup.length > beforeAmbient, { label: '带背景的群回复' });
+    const bgUser = lastUserText();
+    check('背景已注入当前消息', bgUser.includes('【群里刚才聊到'), bgUser.slice(0, 36).replace(/\n/g, '⏎'));
+    check('背景含之前聊到的内容', bgUser.includes('老王') && bgUser.includes('7116 充电器项目'), bgUser.split('\n').slice(1, 3).join(' | '));
+    check('背景每行带相对时间', /^(刚刚|\d+ (分钟|小时)前|\d+ 天前) /.test(bgUser.split('\n').find((l) => l.includes('老王')) || ''), bgUser.split('\n')[0].slice(0, 40));
+
+    console.log('\n--- 10b. 主动插话（不被 @ 也能接一句） ---');
+    llmMode = 'short';
+    const beforeChime = sentGroup.length;
+    pushGroup({ text: '假机器人 你说这方案行不行', name: '老王' }); // 提到名字但没 @
+    await waitFor(() => sentGroup.length > beforeChime, { label: '主动插话' });
+    await sleep(400);
+    const chimeMsgs = sentGroup.slice(beforeChime);
+    check('提到名字但没 @ 也能主动接一句', chimeMsgs.length >= 1, `${chimeMsgs.length} 条`);
+    check(
+      '插话不带 @ 也不带引用（像群友随口接的一句）',
+      chimeMsgs.every((p) => !hasSeg(p, 'at') && !hasSeg(p, 'reply')),
+      chimeMsgs.map((p) => p.message.map((s) => s.type).join('+')).join(' / ')
+    );
+
+    const beforeChime2 = sentGroup.length;
+    pushGroup({ text: '假机器人 那你说呢', name: '老王' });
+    await sleep(1500);
+    check('冷却期内不会连着插话', sentGroup.length === beforeChime2, `多出 ${sentGroup.length - beforeChime2} 条`);
+
+    const beforeChime3 = sentGroup.length;
+    pushGroup({ text: '今天这天气是真的热啊', name: '小李' });
+    await sleep(1200);
+    check('没提到名字的闲聊不会插话', sentGroup.length === beforeChime3, `多出 ${sentGroup.length - beforeChime3} 条`);
+    llmMode = 'md';
+
+    console.log('\n--- 10c. 用量统计 ---');
+    check(
+      '日志里记录了 token 用量与前缀缓存命中率',
+      /用量 输入 \d+（缓存命中 \d+\/\d+，\d+%）/.test(bridge.log()),
+      ((bridge.log().match(/用量 [^\n]*/) || ['(无)'])[0] || '').slice(0, 80)
+    );
+
+    console.log('\n--- 11. 工具闭环 ---');
+    // 跑一次"模型请求工具 → 本地执行 → 模型据结果作答"的完整回合
+    const toolRound = async (mode, text, label, expect) => {
+      llmMode = mode;
+      const before = sentGroup.length;
+      const reqBefore = llmReqs.length;
+      pushGroup({ text, at: true, name: '工具测试' });
+      await waitFor(() => sentGroup.length > before, { label: `${label} 回答` });
+      const reqs = llmReqs.slice(reqBefore);
+      const toolMsg = reqs.flatMap((r) => r.messages || []).find((m) => m.role === 'tool');
+      const content = toolMsg ? String(toolMsg.content) : '';
+      check(`${label}：工具被调用且结果正确`, expect.test(content), content.slice(0, 70).replace(/\n/g, ' '));
+      return reqs;
+    };
+
+    llmMode = 'calc';
+    const reqsCalc = await toolRound('calc', '帮我算 1234*0.15', '计算器 calc', /1234\*0\.15 = 185\.1/);
+    const withTools = reqsCalc.find((r) => (r.tools || []).length);
+    const names = withTools ? withTools.tools.map((t) => t.function?.name) : [];
+    check('请求里带齐 6 个工具', names.length === 6, names.join(',') || '(无)');
+    check(
+      '工具清单含 web_search/calc/time_diff/random/fetch_url/send_sticker',
+      ['web_search', 'calc', 'time_diff', 'random', 'fetch_url', 'send_sticker'].every((n) => names.includes(n))
+    );
+    check('拿到计算结果后由模型给出最终答案', segText(sentGroup[sentGroup.length - 1]).includes('185.1'));
+
+    await toolRound('time', '帮我算算离明天还有几天', '日期 time_diff', /相差 1 天/);
+    await toolRound('random', '帮我掷三个骰子', '随机 random', /🎲 3d6：/);
+    await toolRound('fetch', '帮我看看这个链接', '读网页 fetch_url（内网必须被拦）', /内网/);
+
+    // ---- 表情包 ----
+    const reqsSticker = await toolRound('sticker', '哈哈哈你太逗了', '表情包 send_sticker', /已发出表情包：大笑/);
+    const imgMsgs = () => sentGroup.filter((p) => (p.message || []).some((s) => s.type === 'image'));
+    check('表情真的作为图片发出去了', imgMsgs().length === 1, `${imgMsgs().length} 条带图`);
+    check(
+      '表情是独立一条消息（不带 @ / 引用）',
+      !!imgMsgs()[0] && !hasSeg(imgMsgs()[0], 'at') && !hasSeg(imgMsgs()[0], 'reply'),
+      imgMsgs()[0] ? `段：${imgMsgs()[0].message.map((s) => s.type).join('+')}` : '(无)'
+    );
+    const imgSeg = imgMsgs()[0] ? imgMsgs()[0].message.find((s) => s.type === 'image') : null;
+    check(
+      '表情文件名对应情绪名',
+      !!imgSeg && String(imgSeg.data.file).includes('大笑'),
+      imgSeg ? path.basename(String(imgSeg.data.file)) : '(无)'
+    );
+    check(
+      '工具清单里出现了 send_sticker',
+      reqsSticker.some((r) => (r.tools || []).some((t) => t.function?.name === 'send_sticker'))
+    );
+
+    // 没有冷却 —— 紧接着再要一次照样能发（这是本轮明确要求的改动）
+    pushGroup({ text: '再发一个', at: true, name: '笑点低' });
+    await waitFor(() => imgMsgs().length > 1, { label: '第二张表情' });
+    check('没有冷却：紧接着还能再发一张', imgMsgs().length === 2, `${imgMsgs().length} 条带图`);
+    check(
+      '第二张同样是独立消息',
+      (() => {
+        const m = imgMsgs()[1];
+        return !!m && !hasSeg(m, 'at') && !hasSeg(m, 'reply');
+      })()
+    );
+
+    // 私聊指令 /sticker
+    const beforeCmd = sentPrivate.length;
+    pushPrivate({ text: '/sticker 卖萌' });
+    await waitFor(() => sentPrivate.length > beforeCmd + 1, { label: '/sticker 试发' });
+    check(
+      '/sticker 情绪名 能立刻试发一张',
+      sentPrivate.slice(beforeCmd).some((p) => (p.message || []).some((s) => s.type === 'image'))
+    );
+    const beforeList = sentPrivate.length;
+    pushPrivate({ text: '/sticker list' });
+    await waitFor(() => sentPrivate.length > beforeList, { label: '/sticker list' });
+    check('/sticker list 列出套装与情绪', segText(sentPrivate[sentPrivate.length - 1]).includes('当前套装'), segText(sentPrivate[sentPrivate.length - 1]).split('\n')[0]);
+    llmMode = 'md';
+
+    console.log('\n--- 12. 长回复分片 ---');
+    llmMode = 'long';
+    const beforeLong = sentGroup.length;
+    pushGroup({ text: '说长一点', at: true });
+    await waitFor(() => sentGroup.length > beforeLong, { label: '长回复首片' });
+    await sleep(1500);
+    const longParts = sentGroup.slice(beforeLong);
+    check('长回复被分片发送', longParts.length > 1, `${longParts.length} 片`);
+    check('分片数不超过上限 5', longParts.length <= 5, `${longParts.length} 片`);
+    check(
+      '单片长度不超过上限 900 字（@ 后补的空格不计）',
+      longParts.every((x) => segText(x).replace(/^ /, '').length <= 900),
+      longParts.map((x) => segText(x).replace(/^ /, '').length).join(',')
+    );
+    check(
+      '续发的那几条不再 @ 也不再引用（否则等于连发提醒）',
+      longParts.slice(1).every((p) => !hasSeg(p, 'at') && !hasSeg(p, 'reply')),
+      longParts.map((p) => p.message.map((s) => s.type).join('+')).join(' / ')
+    );
+    llmMode = 'md';
+
+    console.log('\n--- 13. 断线自动重连 ---');
+    const oldConn = obConn;
+    obReady = false;
+    oldConn.close();
+    await waitFor(() => obConn !== oldConn && obReady, { label: '自动重连并重新取登录信息', timeout: 15000 });
+    check('连接断开后自动重连', true);
+    const beforeRe = sentGroup.length;
+    pushGroup({ text: '重连后还在吗', at: true });
+    await waitFor(() => sentGroup.length > beforeRe, { label: '重连后的群回复' });
+    check('重连后仍能正常回答', true);
+
+    console.log('\n--- 14. /ctx 查看与清空群聊背景 ---');
+    const beforeCtx = sentPrivate.length;
+    pushPrivate({ text: '/ctx' });
+    await waitFor(() => sentPrivate.length > beforeCtx, { label: '/ctx 回复' });
+    const ctxReply = segText(sentPrivate[sentPrivate.length - 1]);
+    check(
+      '/ctx 列出已记录的群聊背景',
+      /群 \d+：已记 \d+ 条/.test(ctxReply) && /^.+：.+$/m.test(ctxReply),
+      ctxReply.split('\n')[0]
+    );
+    const beforeCtxClear = sentPrivate.length;
+    pushPrivate({ text: '/ctx clear' });
+    await waitFor(() => sentPrivate.length > beforeCtxClear, { label: '/ctx clear 回复' });
+    check('/ctx clear 能清空背景', segText(sentPrivate[sentPrivate.length - 1]).includes('已清空'));
+    const beforeCtxAfter = sentPrivate.length;
+    pushPrivate({ text: '/ctx' });
+    await waitFor(() => sentPrivate.length > beforeCtxAfter, { label: '/ctx 复查' });
+    check('清空后不再有背景记录', segText(sentPrivate[sentPrivate.length - 1]).includes('还没有记录到群聊背景'));
+  } catch (e) {
+    check(`执行中断：${e.message}`, false);
+    console.log('--- bridge 运行日志（末尾 3000 字）---');
+    console.log(bridge.log().slice(-3000));
+  } finally {
+    bridge.proc.kill();
+    await sleep(200);
+  }
+
+  // ---------------- 15. 频率限制（独立实例） ----------------
+  console.log('\n--- 15. 频率限制 ---');
+  {
+    llmMode = 'short'; // 单段回复，「一条消息 = 一次回答」才好数
+    const obWs = await startOneBotMock();
+    obReady = false;
+    const rlSent = sentGroup;
+    sentGroup = [];
+    const rlCfg = mkCfg(apiPort, obWs.port, {
+      limits: { enabled: true, userCooldownMs: 0, sessionCooldownMs: 2000, maxConcurrent: 3, hourlyLimitPerSession: 60, notifyOnLimit: true },
+      logFile: 'logs/selftest-limits.log',
+      stateFile: 'state-limits.json',
+    });
+    const rl = startBridge('limits', rlCfg);
+    try {
+      await waitFor(() => obConn && obReady, { label: '限流实例就绪' });
+      await sleep(300);
+      pushGroup({ text: '问题一', at: true, userId: 10001 });
+      await waitFor(() => sentGroup.length >= 1, { label: '第一条正常回复' });
+      check('限流：首条请求正常放行', sentGroup.length === 1);
+
+      // 换个用户，避开用户级冷却，只撞会话级冷却
+      pushGroup({ text: '问题二', at: true, userId: 10002 });
+      await sleep(800);
+      check('限流：会话冷却拦截第二条且静默', sentGroup.length === 1, `回复数 ${sentGroup.length}`);
+
+      await sleep(1600);
+      pushGroup({ text: '问题三', at: true, userId: 10003 });
+      await waitFor(() => sentGroup.length >= 2, { label: '冷却结束后恢复' });
+      check('限流：冷却期过后恢复响应', sentGroup.length === 2);
+    } catch (e) {
+      check(`限流测试失败：${e.message}`, false);
+      console.log('--- 限流实例日志 ---');
+      console.log(rl.log().slice(-1200));
+    } finally {
+      rl.proc.kill();
+      await sleep(200);
+      await obWs.close();
+      sentGroup = rlSent;
+      llmMode = 'md';
+    }
+  }
+
+  // ---------------- 16. 纯函数回归 ----------------
+  console.log('\n--- 16. 纯函数回归 ---');
+  {
+    const kA = sessionKey({ scene: 'group', sceneId: 'GRP_A', userId: 'U1' }, true);
+    const kB = sessionKey({ scene: 'group', sceneId: 'GRP_B', userId: 'U1' }, true);
+    const kP = sessionKey({ scene: 'private', sceneId: 'OPENID_X' }, true);
+    check('会话隔离：不同群 key 不同', kA !== kB, `${kA} vs ${kB}`);
+    check('会话隔离：私聊 key 正确', kP === 'private:OPENID_X', kP);
+    check('会话隔离：key 不含 undefined', !kA.includes('undefined') && !kP.includes('undefined'));
+
+    const e1 = extractContent({
+      message: [
+        { type: 'image', data: { url: 'https://example.com/a.png' } },
+        { type: 'text', data: { text: ' 这是什么' } },
+      ],
+    });
+    check('图片提取：拿到 URL 而非 "[图片]"', e1.images.length === 1 && e1.text === '这是什么', JSON.stringify(e1));
+
+    const e2 = extractContent({ raw_message: '[CQ:at,qq=123][CQ:image,url=https://example.com/b.jpg]看看' });
+    check('图片提取：CQ 字符串格式也能取到', e2.images.length === 1 && e2.ats.includes('123'), JSON.stringify(e2));
+
+    const html =
+      '<ol><li class="b_algo"><h2><a href="https://a.com/x">标题甲</a></h2><p>摘要甲 &amp; 内容</p></li>' +
+      '<li class="b_algo"><h2><a href="https://b.com/y">标题乙</a></h2><p>摘要乙</p></li></ol>';
+    const parsed = parseBing(html, 5);
+    check(
+      '搜索解析：条目数与字段正确',
+      parsed.length === 2 && parsed[0].title === '标题甲' && parsed[0].url === 'https://a.com/x',
+      JSON.stringify(parsed[0])
+    );
+    check('搜索解析：HTML 实体已还原', parsed[0].snippet === '摘要甲 & 内容', parsed[0].snippet);
+
+    check('计算器：四则运算', evaluateExpression('(88+12)/4').value === 25);
+    check('计算器：百分比', evaluateExpression('1234*15%').value === 185.1, String(evaluateExpression('1234*15%').value));
+    check('计算器：浮点误差已收敛', evaluateExpression('0.1+0.2').value === 0.3);
+    check('计算器：除零被拦', evaluateExpression('1/0').ok === false, evaluateExpression('1/0').error);
+    check('计算器：拒绝非数学内容', evaluateExpression('process.exit(1)').ok === false);
+
+    // ---- 日期工具 ----
+    const NOW = new Date(2026, 8, 30); // 2026-09-30
+    const td1 = computeTimeDiff({ to: '2026-10-01' }, NOW);
+    check('日期：相差天数正确', td1.ok && td1.days === 1, td1.ok ? td1.text : td1.error);
+    check('日期：结果带星期几', td1.ok && td1.text.includes('星期四'), td1.ok ? td1.text : '');
+    check('日期：支持「明天」', computeTimeDiff({ to: '明天' }, NOW).days === 1);
+    check('日期：支持「10月1号」写法', (parseDateLoose('10月1号', NOW) || { getMonth: () => -1 }).getMonth() === 9);
+    const bad = computeTimeDiff({ to: '2026-02-30' }, NOW);
+    check('日期：不存在的日期被拦', bad.ok === false, bad.error);
+    check('日期：跨月天数正确', dayDiff(new Date(2026, 8, 30), new Date(2026, 9, 3)) === 3);
+
+    // ---- 随机工具 ----
+    const d3 = rollDice('3d6');
+    check('随机：3d6 结果落在 3~18', d3.ok && d3.total >= 3 && d3.total <= 18, d3.ok ? d3.text : d3.error);
+    check('随机：非法骰子写法被拦', rollDice('abc').ok === false);
+    const pk = pickOne(['甲', '乙', '丙']);
+    check('随机：抽签结果来自候选', pk.ok && ['甲', '乙', '丙'].includes(pk.picked), pk.ok ? pk.text : pk.error);
+    check('随机：空候选被拦', pickOne([]).ok === false);
+    check('随机：单一范围整数正确', randomInt(7, 7).value === 7);
+
+    // ---- 读网页：安全门禁（关键）----
+    check(
+      '读网页：挡掉本机/内网/元数据地址',
+      isBlockedIp('127.0.0.1') &&
+        isBlockedIp('10.0.0.5') &&
+        isBlockedIp('192.168.1.1') &&
+        isBlockedIp('169.254.169.254') &&
+        isBlockedIp('::1')
+    );
+    check('读网页：放行公网 IP', !isBlockedIp('8.8.8.8') && !isBlockedIp('1.1.1.1'));
+    check('读网页：挡掉 localhost / .local', isBlockedHost('localhost') && isBlockedHost('foo.local') && isBlockedHost('127.0.0.1'));
+    check('读网页：放行普通域名', !isBlockedHost('example.com'));
+    const sampleHtml =
+      '<html><head><title>页面标题</title><style>.a{color:red}</style></head><body>' +
+      '<p>你好&amp;世界</p><script>bad()</script><div>第二段</div></body></html>';
+    const plain = htmlToText(sampleHtml);
+    check(
+      '读网页：HTML 转纯文本正确',
+      plain.includes('你好&世界') && plain.includes('第二段') && !plain.includes('bad(') && !plain.includes('color:red'),
+      plain.replace(/\n/g, '⏎')
+    );
+    check('读网页：标题提取正确', extractTitle(sampleHtml) === '页面标题', extractTitle(sampleHtml));
+
+    // ---- 搜索谓词（规则前置）----
+    check('搜索规则：时效问题给提示', searchPredicate('最近有什么 AI 大新闻') === 'hint');
+    check('搜索规则：明确要求查→提示', searchPredicate('帮我查一下明天天气') === 'hint');
+    check(
+      '搜索规则：闲聊不提示',
+      searchPredicate('你好呀') === 'allow' && searchPredicate('最近好吗') === 'allow',
+      `${searchPredicate('你好呀')}/${searchPredicate('最近好吗')}`
+    );
+    check('搜索规则：算术不提示', searchPredicate('1+1 等于几') === 'allow');
+
+    // ---- 表情包库 ----
+    const sroot = path.join(TMP, 'stickers');
+    const libA = new StickerLibrary({ activeSet: '测试套' }, sroot);
+    check(
+      '表情库：扫到套装与情绪',
+      libA.setNames.includes('测试套') && libA.moods().includes('大笑'),
+      `${libA.setNames.join(',')} / ${libA.moods().join(',')}`
+    );
+    check(
+      '表情库：情绪名容错匹配',
+      libA.resolveMood('大笑') === '大笑' && libA.resolveMood('大笑啦') === '大笑',
+      String(libA.resolveMood('大笑啦'))
+    );
+    check('表情库：不存在的情绪返回空', libA.resolveMood('根本没这个') === null);
+    const p1 = libA.pick('大笑');
+    check('表情库：取到绝对路径的图', p1.ok && path.isAbsolute(p1.file) && p1.file.endsWith('.png'), p1.ok ? path.basename(p1.file) : p1.error);
+    check('表情库：没有冷却，可以连着取', libA.pick('大笑').ok === true && libA.pick('大笑').ok === true);
+    check('表情库：统计信息正确', libA.stats().moods === 2 && libA.stats().images === 2, JSON.stringify(libA.stats()));
+    check('表情库：关掉时拒绝取图', new StickerLibrary({ enabled: false }, sroot).pick('大笑').ok === false);
+    const libC = new StickerLibrary({ activeSet: '不存在的套装' }, sroot);
+    check(
+      '表情库：套装名写错时回退第一套并给出提示',
+      libC.activeSet === '测试套' && libC.activeError.includes('找不到'),
+      `${libC.activeSet} / ${libC.activeError}`
+    );
+
+    check('难度：闲聊判为 easy', classifyDifficulty('你好呀') === 'easy');
+    check(
+      '难度：分析类判为 hard',
+      classifyDifficulty('帮我分析一下这个方案的架构设计有什么问题') === 'hard',
+      String(classifyDifficulty('帮我分析一下这个方案的架构设计有什么问题'))
+    );
+
+    const sum = summarizeLocal([
+      { role: 'user', content: '第一个问题'.repeat(20) },
+      { role: 'assistant', content: '一段回答' },
+      { role: 'user', content: '第二个问题' },
+    ]);
+    check('摘要：只取用户侧且截断', sum.includes('第一个问题') && sum.includes('第二个问题') && sum.length < 90, `${sum.length} 字`);
+
+    const KEY = '__compact_test__';
+    clearHistory(KEY);
+    for (let i = 0; i < 30; i += 1) {
+      pushHistory(KEY, i % 2 ? 'assistant' : 'user', `第${i}问`, { keep: 4, compactAt: 8, maxSummaryChars: 300 });
+    }
+    const ctx = getContext(KEY, 4);
+    check('历史压缩：消息数压到 keep 附近', ctx.messages.length > 0 && ctx.messages.length <= 5, `${ctx.messages.length} 条`);
+    check('历史压缩：摘要已生成', ctx.summary.length > 0, `${ctx.summary.length} 字`);
+    clearHistory(KEY);
+
+    check('背景过滤：水聊被挡掉', isFiller('哈哈哈') && isFiller('收到') && isFiller('') && isFiller('[表情]'));
+    check('背景过滤：正常内容放行', !isFiller('今天开会改到三点') && !isFiller('这个方案我觉得可以'));
+
+    const ab = new AmbientBuffer({ injectItems: 3, injectMaxChars: 1000 });
+    for (const t of ['第一条', '第二条', '第三条', '第四条', '第五条']) ab.push('G1', { userName: 'U', text: t });
+    check('背景快照：只取最近 injectItems 条', ab.snapshot('G1').split('\n').length === 3, ab.snapshot('G1').replace(/\n/g, ' | '));
+    ab.push('G2', { userName: 'U', text: '哈哈' });
+    check('背景：水聊不进缓冲', ab.size('G2') === 0);
+    ab.push('G2', { userName: 'U', text: '这条有意义' });
+    check('背景：正常内容进缓冲', ab.size('G2') === 1);
+    check('背景快照带发言人', /^刚刚 U：这条有意义$/.test(ab.snapshot('G2')), ab.snapshot('G2'));
+
+    // ---- 背景按需注入 ----
+    check(
+      '背景按需：指代/承接类问题才要背景',
+      needBackground('那个方案靠谱吗') &&
+        needBackground('刚才说的啥') &&
+        needBackground('然后呢') &&
+        needBackground('你怎么看这个')
+    );
+    check(
+      '背景按需：自足的问题不要背景',
+      !needBackground('1+1 等于几') && !needBackground('帮我算 1234*0.15') && !needBackground('你好呀')
+    );
+    check('背景按需：其他/其它 不算指代', !needBackground('其他人呢') && !needBackground('其它方案呢'));
+
+    // ---- 相对时间 ----
+    const t0 = Date.now();
+    check('相对时间：刚刚', relTime(t0 - 5000, t0) === '刚刚');
+    check('相对时间：分钟', relTime(t0 - 5 * 60000, t0) === '5 分钟前');
+    check('相对时间：小时', relTime(t0 - 3 * 3600000, t0) === '3 小时前');
+    const abT = new AmbientBuffer({ injectItems: 5, injectMaxChars: 999 });
+    abT.push('G', { userName: '老王', text: '下午三点开会' });
+    check('背景每行带相对时间', /^刚刚 老王：下午三点开会$/.test(abT.snapshot('G')), abT.snapshot('G'));
+    check(
+      '活跃度统计可用（插话闸门要用）',
+      abT.recent('G', 60000) === 1 && abT.recent('别的群', 60000) === 0,
+      `${abT.recent('G', 60000)} / ${abT.recent('别的群', 60000)}`
+    );
+
+    // ---- 分片：一段 = 一条消息 ----
+    const sp1 = splitMessage('第一段。\n\n第二段。\n\n第三段。', 900, 5);
+    check('分片：空行分段各自成一条', sp1.length === 3, sp1.map((x) => x.length).join(','));
+    check('分片：单段仍然只发一条', splitMessage('只有一段，没有空行。', 900, 5).length === 1);
+    const sp3 = splitMessage('段一\n\n段二\n\n段三\n\n段四\n\n段五\n\n段六', 900, 3);
+    check(
+      '分片：超条数上限时合并尾部而不是丢弃',
+      sp3.length === 3 && sp3[2].includes('段三') && sp3[2].includes('段六'),
+      sp3.join(' | ')
+    );
+    const sp4 = splitMessage('这是一句话。'.repeat(300), 900, 5);
+    check('分片：超长单段退化成按长度切', sp4.length > 1 && sp4.every((x) => x.length <= 900), sp4.map((x) => x.length).join(','));
+
+    // few-shot 示范文件：应被追加在人设之后
+    fs.writeFileSync(path.join(TMP, 'fs.txt'), '# 示范\n问：在吗？\n答：在的呀～');
+    const fsCfgPath = path.join(TMP, 'config-fewshot.json');
+    fs.writeFileSync(
+      fsCfgPath,
+      JSON.stringify({ llm: { systemPromptFile: '', systemPrompt: '基础人设', fewShotFile: 'fs.txt' } })
+    );
+    const fsCfg = loadConfig(fsCfgPath);
+    check(
+      'few-shot 文件被追加进 system prompt',
+      fsCfg.llm.systemPrompt.includes('基础人设') && fsCfg.llm.systemPrompt.includes('答：在的呀～'),
+      fsCfg.llm.systemPrompt.replace(/\n/g, '⏎')
+    );
+    check('few-shot 来源被记录（供启动日志打印）', fsCfg.__fewShotSource === 'fs.txt', String(fsCfg.__fewShotSource));
+  }
+
+  // ---------------- 17. 首次连不上不应导致进程退出（回归） ----------------
+  // 背景：Node 内置 WebSocket「首次就连不上」时只触发 error、不触发 close（实测 v22.12.0）。
+  // 早期重连只挂在 onclose 上，于是首次连接失败时没有任何定时器存活，
+  // 事件循环清空 → 整个桥静默退出。这条用例守住它。
+  console.log('\n--- 17. 首次连接失败的重连回归 ---');
+  {
+    const deadPort = await new Promise((resolve) => {
+      const s = net.createServer();
+      s.listen(0, '127.0.0.1', () => {
+        const p = s.address().port;
+        s.close(() => resolve(p));
+      });
+    });
+    const dead = startBridge(
+      'deadport',
+      mkCfg(apiPort, deadPort, {
+        onebot: { wsUrl: `ws://127.0.0.1:${deadPort}`, reconnectBaseMs: 200, reconnectMaxMs: 500 },
+        logFile: 'logs/selftest-dead.log',
+        stateFile: 'state-dead.json',
+      })
+    );
+    try {
+      await sleep(2500);
+      check('首次连不上时进程不退出（回归）', dead.proc.exitCode === null, `exitCode=${dead.proc.exitCode}`);
+      check(
+        '且留下了重连日志',
+        dead.log().includes('连接不可用') && dead.log().includes('后重连'),
+        (dead.log().split('后重连')[0] || '').slice(-24).replace(/\n/g, ' ')
+      );
+    } catch (e) {
+      check(`重连回归测试失败：${e.message}`, false);
+    } finally {
+      dead.proc.kill();
+      await sleep(200);
+    }
+  }
+
+  const failed = results.filter((r) => !r.ok);
+  console.log('\n========================================');
+  console.log(`  自测结果：${results.length - failed.length}/${results.length} 通过`);
+  console.log('========================================');
+  if (failed.length) {
+    console.log('\n失败项：');
+    for (const f of failed) console.log(`  - ${f.name}`);
+  }
+  process.exit(failed.length ? 1 : 0);
+}
+
+main().catch((e) => {
+  console.error('自测脚本异常：', e);
+  process.exit(1);
+});

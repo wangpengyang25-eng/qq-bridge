@@ -1,0 +1,89 @@
+{
+  "transport": "onebot",
+  "onebot": {
+    "wsUrl": "ws://127.0.0.1:3001",
+    "accessToken": ""
+  },
+  "bot": {
+    "admins": [],
+    "allowedGroups": [],
+    "replyWithQuote": true
+  },
+  "mode": {
+    "enabledOnStart": true,
+    "requireAt": true,
+    "groupShareContext": true
+  },
+  "limits": {
+    "enabled": true,
+    "userCooldownMs": 10000,
+    "sessionCooldownMs": 3000,
+    "maxConcurrent": 3,
+    "hourlyLimitPerSession": 300,
+    "notifyOnLimit": true
+  },
+  "llm": {
+    "baseUrl": "https://api.deepseek.com/v1",
+    "apiKey": "你的模型 API Key",
+    "model": "deepseek-flash",
+    "effort": "low",
+    "effortHard": "high",
+    "adaptive": true,
+    "temperature": 0.7,
+    "maxTokens": 650,
+    "maxTokensHard": 1200,
+    "historyLimit": 12,
+    "historyCompactAt": 24,
+    "summaryMaxChars": 400,
+    "fewShotFile": "fewshot/G-枝堇Sumire.txt"
+  },
+  "search": {
+    "enabled": true,
+    "maxResults": 5,
+    "cooldownMs": 15000,
+    "maxRoundsPerReply": 2,
+    "rules": {
+      "enabled": true
+    }
+  },
+  "tools": {
+    "maxRoundsPerReply": 2,
+    "datetime": true,
+    "random": true,
+    "fetchUrl": true,
+    "fetchMaxChars": 3000
+  },
+  "calc": {
+    "enabled": true
+  },
+  "vision": {
+    "enabled": true,
+    "maxBytes": 2097152,
+    "maxImages": 2
+  },
+  "ambient": {
+    "enabled": true,
+    "smartInject": true,
+    "maxKeep": 30,
+    "injectItems": 8,
+    "injectMaxChars": 500,
+    "minLen": 2
+  },
+  "stickers": {
+    "enabled": true,
+    "dir": "stickers",
+    "activeSet": "04-线条狗",
+    "maxMoods": 60,
+    "position": "after"
+  },
+  "proactive": {
+    "enabled": true,
+    "names": ["枝堇", "Sumire", "堇"],
+    "onQuestion": false,
+    "onImage": true,
+    "minIntervalMs": 30000,
+    "dailyLimit": 100,
+    "windowMs": 180000,
+    "minActivity": 3
+  }
+}
