@@ -1,0 +1,16 @@
+{
+  "name": "qq-bridge-webui",
+  "version": "0.1.0",
+  "private": true,
+  "description": "qq-bridge 的本地控制台：群友档案与亲密度。零依赖、零构建。",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node server.mjs",
+    "seed": "node scripts/seed.mjs",
+    "seed:clear": "node scripts/seed.mjs --clear",
+    "avatars": "node scripts/gen-avatars.mjs"
+  }
+}

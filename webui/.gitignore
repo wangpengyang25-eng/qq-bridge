@@ -1,0 +1,11 @@
+# 群友数据是个人隐私，不进版本库
+data/members.json
+data/*.tmp-*
+
+# 头像：演示用 AI 生成的图，4.4MB，可随时重新生成（npm run avatars）
+public/avatars/
+
+# 系统垃圾
+Thumbs.db
+desktop.ini
+.DS_Store
