@@ -20,7 +20,7 @@ import { createControlReader } from './control.mjs';
 import { StickerSense, decideStickerReply, pickReplyMood } from './stickersense.mjs';
 import { relationLine, levelOf } from './profile.mjs';
 import { PersonaLoader } from './persona.mjs';
-import { FollowTracker, addressedToOthers } from './followup.mjs';
+import { FollowTracker, addressedToOthers, looksLikeQuestion } from './followup.mjs';
 
 /** 接入开关 + 管理员绑定，落盘持久化，重启后保持上次状态 */
 export class StateStore {
@@ -371,14 +371,24 @@ export class Router {
       if (this.follow.noteSpeaker(evt.sceneId, evt.userId)) {
         log(`[router] 群 ${evt.sceneId} 有人插话，连续对话结束`);
       }
-      following = this.follow.isFollowing(evt.sceneId, evt.userId);
-      // @ 了别人：这句不是说给她听的，不接（连续对话状态保留，之后他接着聊还能用）
+      const followResult = this.follow.isFollowing({
+        sceneId: evt.sceneId,
+        userId: evt.userId,
+        replyId: evt.replyId,
+      });
+      following = followResult.ok;
+      if (following) {
+        log(
+          `[router] 连续对话（${followResult.reason === 'quote' ? '引用' : '答她的话'}）：${evt.userName || evt.userId} 没 @ 也接`
+        );
+      }
+      // @ 了别人：这句不是说给她听的，不接（引用别人的也不接）
       if (addressedToOthers(evt)) {
         if (following) log(`[router] ${evt.userName || evt.userId} 在 @ 别人，不接这句`);
         following = false;
-      }
-      if (following && evt.isAtMe === false) {
-        log(`[router] 连续对话中：${evt.userName || evt.userId} 没 @ 也算在问她`);
+      } else if (evt.replyId != null && !following) {
+        // 引用的是别人的消息：可能是给她看热闹，但不是对她说的
+        log(`[router] ${evt.userName || evt.userId} 引用了别的消息（不是她的），不接`);
       }
     }
 
@@ -1371,11 +1381,26 @@ export class Router {
 
       // 表情单独成一条消息（不带 @、不带引用），看起来才像群友随手甩的图
       if (this.cfg.stickers?.position === 'before') await sendSticker();
+      const sentIds = [];
       for (const part of parts) {
         await pause();
-        await sender(part);
+        const res = await sender(part);
+        // 记下自己发出的 message_id：之后有人引用它，就知道是在回她
+        const mid = res?.message_id ?? res?.data?.message_id;
+        if (mid != null) sentIds.push(String(mid));
       }
       if (this.cfg.stickers?.position !== 'before') await sendSticker();
+
+      // 她说了话：把 id 存档，供「引用即接」匹配
+      if (evt?.scene === 'group') {
+        for (const id of sentIds) this.follow.markSent(evt.sceneId, id);
+        // 她以问句收尾 → 开一个「在等他回答」的窗口
+        const lastPart = parts[parts.length - 1] || '';
+        if (looksLikeQuestion(lastPart)) {
+          this.follow.markQuestion(evt.sceneId, evt.userId);
+          log(`[router] 她问了问题，${evt.userName || evt.userId} 接下来不用 @ 也能回答`);
+        }
+      }
       this.stats.answered += 1;
       // 记一笔"回过它"：成员档案里这个数字是主动搭话策略的输入之一。
       // 私聊里 evt 可能没有 userId（管理员自己），markReplied 会安全地返回 false。
@@ -1385,8 +1410,6 @@ export class Router {
         if (evt.scene === 'group') this.initiative.noteSpoke(evt.sceneId);
         // 回群友表情包的"接梗窗口"：群聊和私聊分开记
         this.lastSpokeAt.set(`${evt.scene}:${evt.sceneId}`, Date.now());
-        // 连续对话：从现在起这个人在这个群不用 @ 也能接着说
-        if (evt.scene === 'group' && evt.userId) this.follow.mark(evt.sceneId, evt.userId);
       }
     } catch (e) {
       this.stats.errors += 1;

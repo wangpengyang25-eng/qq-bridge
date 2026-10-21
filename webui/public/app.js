@@ -81,8 +81,8 @@ const GROUP_META = {
 
 const FIELD_META = {
   chat: {
-    followUp: ['连续对话：一个人在跟她聊时不用每句都 @', 'bool'],
-    followUpWindowSec: ['"接着聊"的时间窗口', '秒'],
+    followUp: ['连续对话：引用她或答她的问话时不用 @', 'bool'],
+    followUpWindowSec: ['她问完问题后等回答的时间', '秒'],
   },
   output: {
     maxParts: ['一次最多分几条', '条'],

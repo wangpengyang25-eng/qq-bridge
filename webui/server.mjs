@@ -228,7 +228,7 @@ function readRawSettings() {
       },
       chat: {
         followUp: cfg.mode?.followUp?.enabled !== false,
-        followUpWindowSec: Math.round((cfg.mode?.followUp?.windowMs ?? 180000) / 1000),
+        followUpWindowSec: Math.round((cfg.mode?.followUp?.windowMs ?? 90000) / 1000),
       },
       features: {
         search: cfg.search?.enabled,

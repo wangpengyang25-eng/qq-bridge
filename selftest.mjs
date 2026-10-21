@@ -1517,39 +1517,70 @@ async function main() {
     }
   }
 
-  console.log('\n--- 22. 连续对话（不 @ 也能接着说）---');
+  console.log('\n--- 22. 连续对话（引用即接 / 答她的话）---');
   {
-    const { FollowTracker } = await import('./src/followup.mjs');
+    const { FollowTracker, addressedToOthers, looksLikeQuestion } = await import('./src/followup.mjs');
     const T0 = 3000000000;
-    const f = new FollowTracker({ enabled: true, windowMs: 60000 });
+    const f = new FollowTracker({ enabled: true, windowMs: 90000 });
 
-    check('连续：还没回过话时不算', f.isFollowing('g1', 'u1', T0) === false);
+    check('连续：什么都没发生时不放行', f.isFollowing({ sceneId: 'g1', userId: 'u1', now: T0 }).ok === false);
 
-    f.mark('g1', 'u1', T0);
-    check('连续：刚回过的本人接着说不需 @', f.isFollowing('g1', 'u1', T0 + 1000) === true);
-    check('连续：别人不享受这个待遇', f.isFollowing('g1', 'u2', T0 + 1000) === false);
-    check('连续：别的群不受影响', f.isFollowing('g2', 'u1', T0 + 1000) === false);
-    check('连续：过了窗口就不算', f.isFollowing('g1', 'u1', T0 + 61000) === false);
+    // 1) 引用即接：他引用了她刚发的消息
+    f.markSent('g1', 'msg-1', T0);
+    check(
+      '连续：引用她的消息 → 接',
+      f.isFollowing({ sceneId: 'g1', userId: 'u1', replyId: 'msg-1', now: T0 + 1000 }).reason === 'quote'
+    );
+    check(
+      '连续：引用别人的消息 → 不接',
+      f.isFollowing({ sceneId: 'g1', userId: 'u1', replyId: 'msg-other', now: T0 + 1000 }).ok === false
+    );
+    check(
+      '连续：别的群引用同一个 id 不算',
+      f.isFollowing({ sceneId: 'g2', userId: 'u1', replyId: 'msg-1', now: T0 + 1000 }).ok === false
+    );
+    check(
+      '连续：引用过期（15 分钟后）不接',
+      f.isFollowing({ sceneId: 'g1', userId: 'u1', replyId: 'msg-1', now: T0 + 16 * 60000 }).ok === false
+    );
 
-    // 有人插话 → 立即结束
-    const f2 = new FollowTracker({ enabled: true, windowMs: 60000 });
-    f2.mark('g1', 'u1', T0);
-    check('连续：本人再说话不会打断自己', f2.noteSpeaker('g1', 'u1') === false && f2.isFollowing('g1', 'u1', T0 + 1000));
-    const broke = f2.noteSpeaker('g1', 'u2');
-    check('连续：别人插话会打断', broke === true && f2.isFollowing('g1', 'u1', T0 + 2000) === false);
+    // 2) 问句窗口：她问完 90 秒内，这个人的回答直接接
+    const q = new FollowTracker({ enabled: true, windowMs: 90000 });
+    q.markQuestion('g1', 'u1', T0);
+    check(
+      '连续：她问完，本人回答 → 接',
+      q.isFollowing({ sceneId: 'g1', userId: 'u1', now: T0 + 1000 }).reason === 'question'
+    );
+    check('连续：她问完，别人回答 → 不接', q.isFollowing({ sceneId: 'g1', userId: 'u2', now: T0 + 1000 }).ok === false);
+    check('连续：过了 90 秒就不算', q.isFollowing({ sceneId: 'g1', userId: 'u1', now: T0 + 91000 }).ok === false);
 
-    // 关掉就完全不生效
-    const off = new FollowTracker({ enabled: false, windowMs: 60000 });
-    off.mark('g1', 'u1', T0);
-    check('连续：关掉后即使刚回过也不放行', off.isFollowing('g1', 'u1', T0 + 1000) === false);
+    // 别人插话 → 作废"在等他回答"
+    const q2 = new FollowTracker({ enabled: true, windowMs: 90000 });
+    q2.markQuestion('g1', 'u1', T0);
+    check('连续：本人再说话不打断自己', q2.noteSpeaker('g1', 'u1') === false && q2.isFollowing({ sceneId: 'g1', userId: 'u1', now: T0 + 1000 }).ok);
+    check('连续：别人插话作废问句窗口', q2.noteSpeaker('g1', 'u2') === true && q2.isFollowing({ sceneId: 'g1', userId: 'u1', now: T0 + 2000 }).ok === false);
 
-    // 窗口 0 = 等价于关闭
-    const zero = new FollowTracker({ enabled: true, windowMs: 0 });
-    zero.mark('g1', 'u1', T0);
-    check('连续：窗口为 0 时不放行', zero.isFollowing('g1', 'u1', T0) === false);
+    // 引用不受"别人插话"影响：它是明确指向
+    const q3 = new FollowTracker({ enabled: true, windowMs: 90000 });
+    q3.markSent('g1', 'msg-9', T0);
+    q3.noteSpeaker('g1', 'u2');
+    check('连续：引用不怕别人插话', q3.isFollowing({ sceneId: 'g1', userId: 'u1', replyId: 'msg-9', now: T0 + 1000 }).ok);
 
-    // @ 了别人就不该接：连续对话不能变成"你 @ 谁她都插嘴"
-    const { addressedToOthers } = await import('./src/followup.mjs');
+    // 关掉与窗口 0
+    const off = new FollowTracker({ enabled: false, windowMs: 90000 });
+    off.markSent('g1', 'm', T0);
+    off.markQuestion('g1', 'u1', T0);
+    check('连续：关掉后引用也不放行', off.isFollowing({ sceneId: 'g1', userId: 'u1', replyId: 'm', now: T0 + 1 }).ok === false);
+
+    // 问句判断
+    check('问句：问号结尾', looksLikeQuestion('你今天吃饭了吗？') === true);
+    check('问句：吗字结尾', looksLikeQuestion('你今天吃饭了嘛吗') === true);
+    check('问句：呢字结尾', looksLikeQuestion('那本书呢') === true);
+    check('问句：带引号包着也算', looksLikeQuestion('「你确定？」') === true);
+    check('问句：陈述句不算', looksLikeQuestion('我今天吃过了。') === false);
+    check('问句：空串不算', looksLikeQuestion('') === false);
+
+    // @ 了别人就不该接
     check('连续：@ 别人 = 不是对她说的', addressedToOthers({ ats: ['999'], isAtMe: false }) === true);
     check('连续：@ 里包含她 = 就是对她说的', addressedToOthers({ ats: ['999', '1'], isAtMe: true }) === false);
     check('连续：没 @ 任何人 = 不适用这条规则', addressedToOthers({ ats: [], isAtMe: false }) === false);

@@ -16,11 +16,12 @@ function isStickerSegment(seg) {
   return /表情|sticker/i.test(String(d.summary || ''));
 }
 
-/** 把 OneBot 消息统一成 { ats, images, text, stickers }，兼容 array / CQ 字符串两种格式 */
+/** 把 OneBot 消息统一成 { ats, images, text, stickers, replyId }，兼容 array / CQ 字符串两种格式 */
 export function extractContent(msg) {
   const ats = [];
   const images = [];
   const stickers = [];
+  let replyId = null;
   let text = '';
   const message = msg.message;
 
@@ -28,7 +29,11 @@ export function extractContent(msg) {
     for (const seg of message) {
       const t = seg?.type;
       if (t === 'at') ats.push(String(seg.data?.qq ?? ''));
-      else if (t === 'text') text += seg.data?.text ?? '';
+      else if (t === 'reply') {
+        // 引用回复：这条消息在指向某一具体消息
+        const id = seg.data?.id ?? seg.data?.message_id ?? null;
+        if (id != null) replyId = String(id);
+      } else if (t === 'text') text += seg.data?.text ?? '';
       else if (t === 'image') {
         // 关键：图片要留下 URL 交给视觉链路，而不是压成 "[图片]" 文字
         const u = seg.data?.url || seg.data?.file || '';
@@ -69,10 +74,15 @@ export function extractContent(msg) {
     // 商城表情的 CQ 码
     const mfaces = raw.match(/\[CQ:mface,/g);
     if (mfaces) stickers.push(...mfaces.map(() => ''));
+    // 字符串格式下的引用回复
+    if (!replyId) {
+      const rm = /\[CQ:reply,id=([^,\]]+)/.exec(raw);
+      if (rm) replyId = rm[1].trim();
+    }
     if (!text) text = stripCqCode(decodeFaces(raw));
   }
 
-  return { ats, images, text: text.trim(), stickers };
+  return { ats, images, text: text.trim(), stickers, replyId };
 }
 
 export class OneBot {
@@ -212,7 +222,7 @@ export class OneBot {
   }
 
   toEvent(msg) {
-    const { ats, images, text, stickers } = extractContent(msg);
+    const { ats, images, text, stickers, replyId } = extractContent(msg);
     const selfId = String(this.selfId ?? '');
     if (msg.message_type === 'group') {
       return {
@@ -242,6 +252,7 @@ export class OneBot {
       stickerCount: stickers.length,
       stickerUrls: stickers.filter(Boolean),
       messageId: msg.message_id,
+      replyId,
       isAtMe: true,
       raw: msg,
     };
