@@ -306,6 +306,15 @@ function renderDetail(m) {
     ? `再 <b style="color:var(--dim)">${m.next.gap}</b> 分到「${esc(m.next.name)}」`
     : '已是最高等级';
 
+  const bondOpts = state.bonds
+    .map((b) => `<option value="${esc(b)}" ${m.bond === b ? 'selected' : ''}>${esc(b)}</option>`)
+    .join('');
+  // 换角色卡会换掉整套称号：旧称号不在新卡里时要提示，否则会以为"又坏了"
+  const bondOrphan =
+    m.bond && state.bonds.length && !state.bonds.includes(m.bond)
+      ? `<span class="hint" style="color:var(--rose)">「${esc(m.bond)}」在当前角色卡里不存在，会被忽略</span>`
+      : '';
+
   $('#detail').innerHTML = `
     <div class="detail-top">
       ${avatar(m, 'avatar-lg')}
@@ -354,10 +363,10 @@ function renderDetail(m) {
       <span>关系称号 · 满级之后你们具体是什么关系（会直接影响她说话的方式）</span>
       <select id="bondSelect">
         <option value="">未指定（只说"挚友"）</option>
-        ${state.bonds
-          .map((b) => `<option value="${esc(b)}" ${m.bond === b ? 'selected' : ''}>${esc(b)}</option>`)
-          .join('')}
+        ${bondOpts}
+        ${m.bond && state.bonds.length && !state.bonds.includes(m.bond) ? `<option value="${esc(m.bond)}" selected>${esc(m.bond)}（当前卡里没有）</option>` : ''}
       </select>
+      ${bondOrphan}
     </label>
 
     <div class="rules">
@@ -497,6 +506,14 @@ function renderPersona(d) {
   const opts = ['<option value="">不启用示范</option>']
     .concat(d.fewshot.map((f) => `<option value="${esc(f)}" ${d.activeFewshot === f ? 'selected' : ''}>${esc(f)}</option>`))
     .join('');
+  const personaOpts = (d.personas || ['默认'])
+    .map((n) => {
+      const val = n === '默认' ? '' : n;
+      const cur = (d.activePersona || '默认') === n ? 'selected' : '';
+      return `<option value="${esc(val)}" ${cur}>${esc(n)}</option>`;
+    })
+    .join('');
+
   $('#persona').innerHTML = `
     <div class="persona-grid">
       <label class="field">
@@ -504,6 +521,10 @@ function renderPersona(d) {
         <textarea id="personaText" class="persona-text" placeholder="她是怎样的一个人……">${esc(d.text)}</textarea>
       </label>
       <div class="persona-side">
+        <label class="field">
+          <span>角色卡</span>
+          <select id="personaSelect">${personaOpts}</select>
+        </label>
         <label class="field">
           <span>示范问答（fewshot/）</span>
           <select id="fewshotSelect">${opts}</select>
@@ -514,6 +535,18 @@ function renderPersona(d) {
         </div>
       </div>
     </div>`;
+
+  $('#personaSelect')?.addEventListener('change', async (e) => {
+    try {
+      await api('/api/control', { method: 'PATCH', body: JSON.stringify({ control: { persona: { file: e.target.value } } }) });
+      await loadControl();
+      await loadPersona();
+      await loadMembers(); // 关系称号会跟着角色卡换
+      await loadRuntime();
+    } catch (err) {
+      alert(`切换失败：${err.message}`);
+    }
+  });
 
   $('#savePersona').addEventListener('click', async () => {
     const hint = $('#personaHint');

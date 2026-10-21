@@ -1378,6 +1378,30 @@ async function main() {
     mid.affinity = 35; // 熟络
     check('关系：熟络档允许开玩笑', relationLine(mid).includes('开玩笑'), relationLine(mid));
 
+    // ---- 角色卡自带的关系措辞 ----
+    {
+      const { normalizeRelationTable } = await import('./src/persona.mjs');
+      const table = normalizeRelationTable({
+        guides: { lv0: '第一次见面 —— 保持距离，微笑点头即可', lv4: '', lv9: '不该存在' },
+        coldHint: '（礼貌就是距离）',
+        bonds: { 母女: '你把他当自己的孩子', 空: '', 坏: 123 },
+      });
+      check('角色卡：合法 guides 被保留', table.guides.lv0.includes('保持距离'), JSON.stringify(table.guides));
+      check('角色卡：空字符串与非法档位被丢弃', !table.guides.lv4 && !table.guides.lv9);
+      check('角色卡：bonds 只保留字符串值', table.bonds && '母女' in table.bonds && !('坏' in table.bonds), JSON.stringify(table.bonds));
+      check('角色卡：整个表是垃圾时返回 null', normalizeRelationTable({ foo: 1 }) === null && normalizeRelationTable(null) === null);
+
+      const card = createMember('1005', '指挥官', Date.now());
+      card.affinity = 0;
+      const line0 = relationLine(card, { table });
+      check('角色卡：陌生档用卡里的措辞', line0.includes('微笑点头即可'), line0);
+      check('角色卡：低档位仍带冷的压制提示', line0.includes('礼貌就是距离'), line0);
+
+      const line4 = relationLine(card, { table, affinity: 90, bond: '母女' });
+      check('角色卡：满级用卡里的关系称号', line4.includes('你把他当自己的孩子'), line4);
+      check('角色卡：卡里没有的称号被忽略', !relationLine(card, { table, affinity: 90, bond: '恋人' }).includes('恋人'));
+    }
+
     // 记事本 / PowerShell 保存 UTF-8 会加 BOM，JSON.parse 不认 —— 必须在读配置时剥掉
     {
       const bomFile = path.join(TMP, 'config-bom.json');

@@ -55,6 +55,7 @@ export const DEFAULTS = {
     summaryMaxChars: 400,                        // 早前对话摘要的字数上限
     // 人设：优先读 systemPromptFile 指向的文件（便于编辑），读不到才用下面的 systemPrompt
     systemPromptFile: 'persona.txt',
+    persona: '', // 默认用哪张角色卡（personas/<名字>/persona.txt）；空 = 根目录的 persona.txt
     // few-shot 示范：独立文件，可替换风格（见 fewshot/ 目录）；留空则不加载
     fewShotFile: 'fewshot/A-萌系卖萌.txt',
     systemPrompt:

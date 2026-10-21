@@ -169,6 +169,9 @@ export class Router {
     });
     this._appliedPersona = '';
     this._personaError = null;
+    // 角色卡：config 里的默认值，面板可以临时换
+    this._cfgPersona = cfg.llm?.persona || '';
+    this._relationsTable = null;
     this._activeSet = cfg.stickers?.activeSet || '';
 
     // 连续对话：一个人在跟她聊时，短时间内不 @ 也能接着说
@@ -850,15 +853,21 @@ export class Router {
     return (this.cfg.bot?.allowedGroups || []).map(String);
   }
 
-  /** 人设热重载：改了 persona.txt 或换了示范套，下一条消息就生效 */
+  /** 人设热重载：改了 persona.txt / 换了角色卡 / 换了示范套，下一条消息就生效 */
   applyPersona() {
-    const few = this.readControl().values.persona?.fewshot;
-    const r = this.persona.load({ overrideFewshot: few });
+    const c = this.readControl().values.persona || {};
+    // file 没设过是 undefined（跟随配置）；设成空串表示"用默认角色"
+    const persona = c.file === undefined ? (this._cfgPersona || '') : c.file;
+    const r = this.persona.load({ persona, overrideFewshot: c.fewshot });
     if (r.prompt && r.prompt !== this._appliedPersona) {
       this.cfg.llm.systemPrompt = r.prompt;
       this._appliedPersona = r.prompt;
-      log(`[persona] 人设已更新：${r.source || '(空)'}${r.fewshotName ? ` + 示范 ${r.fewshotName}` : ''}`);
+      log(
+        `[persona] 人设已更新：${r.source || '(空)'}${r.fewshotName ? ` + 示范 ${r.fewshotName}` : ''}`
+      );
     }
+    // 关系措辞表跟着角色卡走
+    this._relationsTable = r.relations || null;
     if (r.error && r.error !== this._personaError) {
       this._personaError = r.error;
       log(`[persona] ${r.error}`);
@@ -1235,6 +1244,7 @@ export class Router {
           note: ov.notes.get(qq),
           affinity: ov.affinity.get(qq),
           bond: ov.bonds.get(qq),
+          table: this._relationsTable || null,
         });
       }
 

@@ -54,6 +54,53 @@ const LOG_FILE = path.join(BRIDGE_DIR || '', CFG_RAW.logFile || 'logs/bridge.log
 const PERSONA_FILE = path.join(BRIDGE_DIR || '', CFG_RAW.llm?.systemPromptFile || 'persona.txt');
 const STICKERS_DIR = path.join(BRIDGE_DIR || '', CFG_RAW.stickers?.dir || 'stickers');
 const FEWSHOT_DIR = path.join(BRIDGE_DIR || '', 'fewshot');
+const PERSONAS_DIR = path.join(BRIDGE_DIR || '', 'personas');
+
+/** 当前该编辑哪个文件：角色卡活跃时编辑卡里的，否则编辑根目录的 */
+function personaFilePath() {
+  const name = activePersona();
+  if (name && name !== '默认') return path.join(PERSONAS_DIR, name, 'persona.txt');
+  return PERSONA_FILE;
+}
+function activePersona() {
+  const ctl = loadControl();
+  const v = ctl.persona?.file;
+  if (typeof v === 'string') return v;
+  return CFG_RAW.llm?.persona || '';
+}
+
+/** 读某张角色卡的关系措辞表（没有就返回 null） */
+function personaRelations(name) {
+  if (!name) return null;
+  try {
+    const file = path.join(PERSONAS_DIR, name, 'relations.json');
+    const doc = JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, ''));
+    if (doc && typeof doc.bonds === 'object') {
+      const bonds = Object.keys(doc.bonds).filter((k) => typeof doc.bonds[k] === 'string');
+      if (bonds.length) return { bonds, guides: doc.guides || null, doc };
+    }
+    return { bonds: [], guides: doc?.guides || null, doc };
+  } catch {
+    return null;
+  }
+}
+
+/** 面板上可选的角色卡 */
+function listPersonas() {
+  const out = [];
+  if (CFG_RAW.llm?.systemPromptFile) {
+    try {
+      fs.accessSync(path.join(BRIDGE_DIR || '', CFG_RAW.llm.systemPromptFile));
+      out.push('默认');
+    } catch { /* 根目录没有 persona.txt 就不列 */ }
+  }
+  try {
+    for (const d of fs.readdirSync(PERSONAS_DIR, { withFileTypes: true })) {
+      if (d.isDirectory() && fs.existsSync(path.join(PERSONAS_DIR, d.name, 'persona.txt'))) out.push(d.name);
+    }
+  } catch { /* 没有 personas/ 目录 */ }
+  return out;
+}
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -334,7 +381,11 @@ const server = http.createServer(async (req, res) => {
         platform: `${process.platform} ${process.arch}`,
         rules: RULES,
         levels: LEVELS,
-        bonds: BOND_NAMES, // 满级之后可选的关系称号
+        // 关系称号跟着当前角色卡走：黑眼的卡里是舞伴/母女/师徒……，枝堇的是闺蜜/恋人……
+        bonds: (personaRelations(activePersona())?.bonds?.length
+          ? personaRelations(activePersona()).bonds
+          : BOND_NAMES),
+        persona: activePersona() || '默认',
       });
     }
 
@@ -374,10 +425,11 @@ const server = http.createServer(async (req, res) => {
 
     if (p === '/api/persona' && req.method === 'GET') {
       const ctl = loadControl();
+      const target = personaFilePath();
       let text = '';
       let error = null;
       try {
-        text = fs.readFileSync(PERSONA_FILE, 'utf8').replace(/^\uFEFF/, '');
+        text = fs.readFileSync(target, 'utf8').replace(/^\uFEFF/, '');
       } catch (e) {
         error = e.message;
       }
@@ -388,10 +440,14 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, {
         text,
         error,
-        file: PERSONA_FILE,
+        file: target,
         fewshot,
         activeFewshot: ctl.persona?.fewshot ?? (CFG_RAW.llm?.fewShotFile || ''),
         overridden: ctl.persona?.fewshot !== undefined,
+        personas: listPersonas(),
+        activePersona: activePersona() || '默认',
+        personaOverridden: ctl.persona?.file !== undefined,
+        relations: personaRelations(activePersona()),
       });
     }
 
@@ -400,10 +456,12 @@ const server = http.createServer(async (req, res) => {
       if (typeof body.text !== 'string') return json(res, 400, { error: '缺少 text' });
       try {
         // 改之前留一份备份，人设写坏了能捞回来
-        const bak = `${PERSONA_FILE}.bak-${Date.now()}`;
-        if (fs.existsSync(PERSONA_FILE)) fs.copyFileSync(PERSONA_FILE, bak);
-        fs.writeFileSync(PERSONA_FILE, body.text, 'utf8');
-        return json(res, 200, { ok: true, bytes: Buffer.byteLength(body.text), backup: path.basename(bak) });
+        const dest = personaFilePath();
+        const bak = `${dest}.bak-${Date.now()}`;
+        fs.mkdirSync(path.dirname(dest), { recursive: true });
+        if (fs.existsSync(dest)) fs.copyFileSync(dest, bak);
+        fs.writeFileSync(dest, body.text, 'utf8');
+        return json(res, 200, { ok: true, bytes: Buffer.byteLength(body.text), backup: path.basename(bak), file: dest });
       } catch (e) {
         return json(res, 500, { error: `写入失败：${e.message}` });
       }

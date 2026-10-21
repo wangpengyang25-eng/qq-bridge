@@ -29,6 +29,7 @@ export const SCHEMA = {
     activeSet: { type: 'text' }, // 用哪一套表情（stickers/ 下的目录名）
   },
   persona: {
+    file: { type: 'text' }, // 用哪一张角色卡（personas/<名字>/）；空 = 默认 persona.txt
     fewshot: { type: 'text' }, // 用哪一份示范（fewshot/ 下的文件名）；空 = 不启用
   },
   output: {

@@ -3,31 +3,77 @@
 // 为什么要单独一层：人设是"她是谁"，是最常改的东西。原来改完必须重启，
 // 因为 config.mjs 在启动时就把 systemPrompt 拼好了。
 // 这里做成"按文件 mtime 缓存"，改了立刻生效，没改就零开销。
+//
+// 角色卡：personas/<名字>/ 目录里放
+//   persona.txt      —— 人设正文
+//   relations.json   —— 这个角色自己的好感度措辞和关系称号（可选）
+// 根目录的 persona.txt 是"默认角色"，老配置不受影响。
 
 import fs from 'node:fs';
 import path from 'node:path';
 
 const CACHE_MS = 2000;
 
+/** 校验并清洗关系措辞表；任何不合法的部分都退回默认，不让一个人设把系统搞坏 */
+export function normalizeRelationTable(doc) {
+  if (!doc || typeof doc !== 'object') return null;
+  const out = {};
+  if (doc.guides && typeof doc.guides === 'object') {
+    const guides = {};
+    for (const key of ['lv0', 'lv1', 'lv2', 'lv3', 'lv4']) {
+      const v = doc.guides[key];
+      if (typeof v === 'string' && v.trim()) guides[key] = v.trim();
+    }
+    if (Object.keys(guides).length) out.guides = guides;
+  }
+  if (typeof doc.coldHint === 'string' && doc.coldHint.trim()) out.coldHint = doc.coldHint.trim();
+  if (doc.bonds && typeof doc.bonds === 'object') {
+    const bonds = {};
+    for (const [k, v] of Object.entries(doc.bonds)) {
+      const name = String(k).trim();
+      if (name && typeof v === 'string' && v.trim()) bonds[name] = v.trim();
+    }
+    if (Object.keys(bonds).length) out.bonds = bonds;
+  }
+  return Object.keys(out).length ? out : null;
+}
+
 export class PersonaLoader {
   /**
    * @param {object} opts
    * @param {string} opts.dir        config.json 所在目录
-   * @param {string} opts.promptFile 人设文件名（如 persona.txt）
+   * @param {string} opts.promptFile 默认人设文件名（如 persona.txt）
    * @param {string} opts.fewshotDir fewshot 目录名
    * @param {string} opts.defaultFewshot 配置里指定的示范文件
+   * @param {string} [opts.personaDir] 角色卡目录（默认 personas）
    */
-  constructor({ dir, promptFile, fewshotDir = 'fewshot', defaultFewshot = '' } = {}) {
+  constructor({ dir, promptFile, fewshotDir = 'fewshot', defaultFewshot = '', personaDir = 'personas' } = {}) {
     this.dir = dir;
     this.promptFile = promptFile || '';
     this.fewshotDir = path.resolve(dir, fewshotDir);
     this.defaultFewshot = defaultFewshot || '';
+    this.personaDir = path.resolve(dir, personaDir);
     this.at = 0;
     this.sig = '';
-    this.result = { prompt: '', fewshotName: '', error: null };
+    this.result = { prompt: '', persona: '', relations: null, fewshotName: '', error: null };
   }
 
-  /** 列出可选的示范文件（给面板用） */
+  /** 列出可选的角色卡（给面板用） */
+  listPersonas() {
+    const out = [];
+    if (this.promptFile && fs.existsSync(path.resolve(this.dir, this.promptFile))) out.push('默认');
+    try {
+      for (const d of fs.readdirSync(this.personaDir, { withFileTypes: true })) {
+        if (!d.isDirectory()) continue;
+        if (fs.existsSync(path.join(this.personaDir, d.name, 'persona.txt'))) out.push(d.name);
+      }
+    } catch {
+      // 没有 personas/ 目录很正常
+    }
+    return out;
+  }
+
+  /** 列出可选的示范文件 */
   listFewshot() {
     try {
       return fs
@@ -40,19 +86,23 @@ export class PersonaLoader {
   }
 
   /**
-   * 取当前生效的人设。overrideFewshot 来自面板（空字符串=不启用示范）。
-   * 返回 { prompt, fewshotName, error }，并带一个 changed 标记告诉调用方要不要更新配置。
+   * 取当前生效的人设。
+   * @param {object} opts
+   * @param {string} [opts.persona] 角色卡名；空/『默认』= 根目录的 persona.txt
+   * @param {string} [opts.overrideFewshot] 面板指定的示范；undefined = 用配置
    */
-  load({ overrideFewshot } = {}) {
+  load({ persona = '', overrideFewshot } = {}) {
     const now = Date.now();
     if (now - this.at < CACHE_MS) return this.result;
 
     const fewshotName = overrideFewshot === undefined ? this.defaultFewshot : String(overrideFewshot || '');
-
-    // 用两个文件的 mtime 当签名：任一变化就重读
-    const pPath = this.promptFile ? path.resolve(this.dir, this.promptFile) : '';
+    const useCard = persona && persona !== '默认';
+    const baseDir = useCard ? path.join(this.personaDir, persona) : this.dir;
+    const pPath = this.promptFile ? path.resolve(baseDir, this.promptFile) : '';
+    const rPath = useCard ? path.join(baseDir, 'relations.json') : '';
     const fPath = fewshotName ? path.resolve(this.fewshotDir, fewshotName) : '';
-    const sig = [pPath, fPath]
+
+    const sig = [persona || '默认', pPath, rPath, fPath]
       .map((p) => {
         if (!p) return '-';
         try {
@@ -78,12 +128,22 @@ export class PersonaLoader {
         const text = fs.readFileSync(pPath, 'utf8').replace(/^\uFEFF/, '').trim();
         if (text) {
           prompt = text;
-          source = this.promptFile;
+          source = path.relative(this.dir, pPath).replace(/\\/g, '/');
         } else {
-          error = `${this.promptFile} 是空文件`;
+          error = `${source || pPath} 是空文件`;
         }
       } catch (e) {
-        error = `读取 ${this.promptFile} 失败：${e.message}`;
+        error = `读取人设失败：${e.message}`;
+      }
+    }
+
+    // 关系措辞：只有角色卡可能带，坏了就当没有
+    let relations = null;
+    if (rPath) {
+      try {
+        relations = normalizeRelationTable(JSON.parse(fs.readFileSync(rPath, 'utf8').replace(/^\uFEFF/, '')));
+      } catch (e) {
+        error = `relations.json 读取失败：${e.message}`;
       }
     }
 
@@ -103,6 +163,8 @@ export class PersonaLoader {
     this.result = {
       prompt: full,
       basePrompt: prompt,
+      persona: useCard ? persona : '默认',
+      relations,
       fewshotName: fewshotText ? fewshotName : '',
       source,
       error,

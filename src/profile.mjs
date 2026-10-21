@@ -178,6 +178,15 @@ export const LEVEL_GUIDE = {
 const COLD_HINT = '（这条优先于人设里的热络倾向：还不熟就该有距离感，别热情过头）';
 
 /**
+ * 关系措辞表：默认值，可以被某个角色的 relations.json 整体覆盖。
+ * 换角色时（比如从书店姐姐换成黑眼），「不熟的时候怎么说话」和
+ * 「满级之后是什么关系」都该跟着换——这两样不该焊死在代码里。
+ */
+export function defaultRelationTable() {
+  return { guides: LEVEL_GUIDE, bonds: BONDS, coldHint: COLD_HINT };
+}
+
+/**
  * 满级之后的具体关系称号。分数只到"挚友"，再往上是什么关系由人自己定，
  * 因为"是闺蜜还是恋人"不是算出来的，是两个人之间的事。
  */
@@ -207,14 +216,20 @@ export function relationLine(m, over = {}) {
   const eff = hasManual ? over.affinity : m?.affinity || 0;
   if (!m && !hasManual) return '';
 
+  // 角色卡可以自带一套措辞（guides / bonds / coldHint），没带就用默认
+  const table = over.table || {};
+  const guides = { ...LEVEL_GUIDE, ...(table.guides || {}) };
+  const bonds = table.bonds && Object.keys(table.bonds).length ? table.bonds : BONDS;
+  const coldHint = table.coldHint || COLD_HINT;
+
   const level = levelOf(eff);
   const cold = level.key === 'lv0' || level.key === 'lv1';
   const lines = [
-    `【你和他现在的关系】${level.name}（亲密度 ${Math.round(eff)}/100）—— ${LEVEL_GUIDE[level.key]}${cold ? COLD_HINT : ''}`,
+    `【你和他现在的关系】${level.name}（亲密度 ${Math.round(eff)}/100）—— ${guides[level.key]}${cold ? coldHint : ''}`,
   ];
 
   const bond = over.bond;
-  if (bond && BONDS[bond]) lines.push(`【你们的关系】${BONDS[bond]}`);
+  if (bond && bonds[bond]) lines.push(`【你们的关系】${bonds[bond]}`);
 
   const s = m?.stats || {};
   if (s.messages) lines.push(`你们聊过 ${s.messages} 句，他被你叫过 ${s.ats || 0} 次`);
