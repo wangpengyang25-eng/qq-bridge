@@ -2,6 +2,8 @@
 // 改参数只改 config.json，不要改这个文件，除非要调整默认值
 import fs from 'node:fs';
 import path from 'node:path';
+// 主动发起的默认值放在引擎自己那里，这里只引用，避免两处各写一份会漂移
+import { DEFAULTS as INITIATIVE_DEFAULTS } from './initiative.mjs';
 
 export const DEFAULTS = {
   // ---- 接入通道：onebot = NapCat / OneBot v11 正向 WebSocket ----
@@ -138,10 +140,18 @@ export const DEFAULTS = {
     enabled: false,
     names: [],             // 触发词：提到这些名字但没 @ 时考虑插话。留空 = 机器人昵称 + 大肥鱼
     onQuestion: false,     // 放宽到"有人在征求意见"也触发（这种才要求群里够热闹）
+    onImage: false,        // 放宽到"有人发了图/表情包"也触发
     minIntervalMs: 600000, // 同一个群两次插话的最小间隔（默认 10 分钟）
     dailyLimit: 20,        // 每天最多插几次
     windowMs: 180000,      // 判断"群里够不够热闹"的观察窗口
     minActivity: 3,        // 窗口内至少要有几条有内容的消息
+
+    // ---- 主动发起谈话（定时器驱动，没人说话也会开口）----
+    // 和上面这些"有消息时顺便接一句"是两套东西，默认全关。
+    // 调度与闸门的默认值在 src/initiative.mjs 的 DEFAULTS 里，这里只放覆盖项。
+    initiative: {
+      ...INITIATIVE_DEFAULTS,
+    },
   },
 
   // ---- 成员档案（群友的关系状态层）----
@@ -151,6 +161,7 @@ export const DEFAULTS = {
   members: {
     enabled: true,
     file: 'data/members.json', // 相对 config.json 所在目录
+    overridesFile: 'data/overrides.json', // 面板写的人工编辑（bridge 只读，用于尊重静音）
     flushMs: 60000,            // 多久落盘一次（有改动才写）
     maxMembers: 500,           // 上限，防止文件无限增长
   },
@@ -202,6 +213,7 @@ export function loadConfig(file) {
   cfg.logFile = path.resolve(dir, cfg.logFile);
   cfg.stateFile = path.resolve(dir, cfg.stateFile);
   if (cfg.members?.file) cfg.members.file = path.resolve(dir, cfg.members.file);
+  if (cfg.members?.overridesFile) cfg.members.overridesFile = path.resolve(dir, cfg.members.overridesFile);
 
   // 人设：独立文件优先，便于随时改而不动代码
   cfg.__personaSource = 'config.json 的 llm.systemPrompt';

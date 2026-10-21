@@ -88,12 +88,16 @@ async function main() {
   } else {
     log('[boot] 成员档案：已关闭');
   }
+  router.startInitiative();
 
   await bot.start();
 
   const shutdown = (sig) => {
     log(`[boot] 收到 ${sig}，正在退出...`);
     bot.stop();
+    try {
+      router?.stopInitiative();
+    } catch { /* 忽略 */ }
     // 退出前把成员档案强制写一次，否则最后 flushMs 内的记录会丢
     try {
       if (router?.members) {

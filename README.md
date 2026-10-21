@@ -206,9 +206,17 @@ NapCat 通道拿到的是真实 **QQ 号**，所以比官方通道简单：
 | **`proactive.enabled`** | `false` | **主动插话**：不被 @ 时偶尔接一句（默认关，见第八节） |
 | `proactive.names` | `[]` | 触发词，提到这些名字但没 @ 时考虑插话。留空 = 机器人昵称 + 大肥鱼 |
 | `proactive.onQuestion` | `false` | 放宽到"有人征求意见"也触发（这种才要求群里够热闹） |
+| `proactive.onImage` | `false` | 放宽到"有人发了图/表情包"也触发 |
 | `proactive.minIntervalMs` | `600000` | 同一个群两次插话的最小间隔 |
 | `proactive.dailyLimit` | `20` | 每天最多插几次 |
 | `proactive.windowMs` / `minActivity` | `180000` / `3` | 判断"群里够不够热闹"的窗口与条数门槛 |
+| **`proactive.initiative.enabled`** | `false` | **主动发起谈话**：没人说话也会开口（默认关，见第十三节） |
+| `proactive.initiative.chime.enabled` | `true` | 冷场接话（跟总开关一起打开即可用） |
+| `proactive.initiative.callout.enabled` | `false` | 按人点名（**@ 人有社交压力，单独开关**） |
+| `proactive.initiative.dailyLimit` | `12` | 全局每天最多主动说几次（两档共用） |
+| `proactive.initiative.quietHours` | `{"start":1,"end":8}` | 免打扰时段（本地时间，跨零点自动处理） |
+| `members.enabled` | `true` | 成员档案：记录群友互动与亲密度（见第十二节） |
+| `members.flushMs` / `maxMembers` | `60000` / `500` | 多久落盘 / 最多记多少人 |
 | `limits.enabled` | `true` | 频率限制总开关 |
 | `limits.userCooldownMs` | `10000` | 同一人在同一会话两次提问的最小间隔（**静默**丢弃） |
 | `limits.sessionCooldownMs` | `3000` | 同一会话两次回复的最小间隔（**静默**丢弃） |
@@ -407,6 +415,53 @@ node server.mjs           # http://127.0.0.1:5173
 
 > `data/` 已进 `.gitignore` —— 里面是真实群友的 QQ 号和互动数据。
 
+## 十三、主动发起谈话（`proactive.initiative`）
+
+和第八节的"插话"不是一回事：插话是**有消息进来时**顺便判断要不要接一句；这里是**没有任何人说话也会开口**，
+所以是定时器驱动的。
+
+两档，共用一套闸门：
+
+| | 触发条件 | 发在哪 | 烦人风险 |
+|---|---|---|---|
+| **chime 冷场接话** | 群刚才热闹，然后安静满 20 分钟 | 群里，**不 @ 人** | 低 |
+| **callout 按人点名** | 定时扫描成员档案，挑"该联系的人" | 群里，**@ 他** | 高 |
+
+**默认全关。** 这是整个项目里社交风险最高的功能——一个真人被机器人 @ 是明确的社交压力，
+所以宁可让人手动打开，也不默认生效。
+
+```jsonc
+// config.json
+"proactive": {
+  "initiative": {
+    "enabled": true,          // 总开关
+    "chime":   { "enabled": true },   // 冷场接话（低风险，建议先只开这个）
+    "callout": { "enabled": false }   // 点名（先别开，跑几天看看再说）
+  }
+}
+```
+
+闸门清单（任何一条不过就不开口，**不产生模型调用**）：
+
+| 闸门 | 默认 | 说明 |
+|---|---|---|
+| 免打扰时段 | 1:00–8:00 | 本地时间，跨零点自动处理 |
+| 全局日限 | 12 次/天 | 两档共用 |
+| 群冷却 | 接话 30 分钟 / 点名 1 小时 | 同一个群 |
+| 每人冷却 | 3 天 | 同一个人最多被点名一次 |
+| 亲密度门槛 | ≥30（熟络） | 只看聊过几句的人，不拿一两条数据下判断 |
+| 发言数门槛 | ≥5 条 | 同上 |
+| 面板静音 | — | 在控制台上点了"不要主动找这个人"，bridge 会读 `data/overrides.json` 遵守 |
+| 群正在回答中 | — | 跳过，别和正常回答打架 |
+| 话题新鲜度 | ≤2 小时 | 凉太久就不接了 |
+
+两个刻意的设计决定：
+
+1. **配额在返回动作时就扣掉**（fail closed）——宁可少说一句，也不要在发送出错时每 60 秒重试一次、把群刷屏。
+2. **决策与执行分离**：`src/initiative.mjs` 只负责"该不该说、跟谁说"，不碰网络也不碰模型；
+   真正开口是 `router.runInitiative()`。所以引擎的 `tick(now)` 时间参数是**从外面传进去的**——
+   "等 20 分钟看会不会冷场"这种判断，在测试里是瞬间完成的。
+
 ## 目录结构
 
 ```
@@ -425,7 +480,7 @@ qq-bridge/
 │   └── 04-线条狗/
 ├── state.json          运行状态：开关 + 已绑定管理员（自动生成）
 ├── start.bat           只启桥（不启 NapCat），手工排查时用
-├── selftest.mjs        端到端自测（146 项断言）
+├── selftest.mjs        端到端自测（166 项断言）
 ├── probe_llm.mjs       模型链路直连测试
 ├── probe_onebot.mjs    NapCat / OneBot 连通性与账号查询
 ├── probe_stickers.mjs  列出各套情绪名 + 重新生成 预览.html
@@ -449,9 +504,12 @@ qq-bridge/
 │   ├── vision.mjs      图片下载转 base64
 │   ├── text.mjs        Markdown 转纯文本、分片
 │   ├── profile.mjs     ★ 成员档案与亲密度规则（**bridge 与面板共用这一份**）
-│   └── members.mjs     成员档案存储：定时落盘 data/members.json
+│   ├── members.mjs     成员档案存储：定时落盘 data/members.json
+│   ├── initiative.mjs  ★ 主动发起的决策引擎（只判断，不说话；时钟可注入）
+│   └── overrides.mjs   读面板写的人工编辑（只取 muted / note）
 ├── data/
-│   └── members.json    ★ 群友档案（bridge 独占写入，已 gitignore）
+│   ├── members.json    ★ 群友档案（bridge 独占写入，已 gitignore）
+│   └── overrides.json  面板的人工编辑（面板独占写入，bridge 只读）
 ├── webui/              ★ 本地控制台：群友档案 / 亲密度（见下节）
 │   ├── server.mjs      本地 HTTP 服务，只监听 127.0.0.1
 │   ├── src/profile.mjs 转发引用（真正的规则在 ../src/profile.mjs）

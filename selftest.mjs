@@ -43,6 +43,7 @@ import {
 } from './src/llm.mjs';
 import { extractContent } from './src/onebot.mjs';
 import { MemberStore } from './src/members.mjs';
+import { InitiativeEngine } from './src/initiative.mjs';
 import { loadConfig } from './src/config.mjs';
 import { parseBing } from './src/search.mjs';
 import { evaluateExpression } from './src/calc.mjs';
@@ -294,6 +295,8 @@ function mkCfg(apiPort, wsPort, over = {}) {
       dailyLimit: 100,
       windowMs: 600000,
       minActivity: 1,
+      // 主动发起：开着但扫描间隔拉长到 60s，测试期间不会真的触发（只验证接线）
+      initiative: { enabled: true, scanEveryMs: 60000 },
     },
     calc: { enabled: true },
     search: { enabled: true, maxResults: 5, cooldownMs: 15000, maxRoundsPerReply: 2 },
@@ -328,6 +331,11 @@ async function main() {
     await waitFor(() => obConn && obReady, { label: 'bridge 完成 get_login_info' });
     await sleep(300);
     check('OneBot 连接 + get_login_info 成功', obReady);
+    check(
+      '接线：主动发起的定时器已启动',
+      bridge.log().includes('主动发起已启动'),
+      (bridge.log().match(/\[router\] 主动发起已启动[^\n]*/) || [''])[0].slice(0, 90)
+    );
 
     console.log('\n--- 2. 群 @ 触发回答 ---');
     pushGroup({ text: '你好', at: true, name: '群友甲' });
@@ -1003,6 +1011,133 @@ async function main() {
       eNormal.images.length === 1 && eNormal.stickers.length === 0,
       JSON.stringify(eNormal)
     );
+  }
+
+  console.log('\n--- 19. 主动发起谈话（决策引擎） ---');
+  {
+    const T0 = 1000000000; // 随便一个固定时刻；免打扰关掉，避免受本机时区影响
+    const baseCfg = (over = {}) => ({
+      enabled: true,
+      scanEveryMs: 1,
+      dailyLimit: 3,
+      quietHours: { start: 0, end: 0 },
+      chime: {
+        enabled: true,
+        quietAfterMs: 1000,
+        staleAfterMs: 60000,
+        windowMs: 5000,
+        minActivity: 3,
+        cooldownMs: 10000,
+      },
+      callout: {
+        enabled: false,
+        minAffinity: 30,
+        minMessages: 5,
+        perUserCooldownMs: 100000,
+        cooldownMs: 5000,
+      },
+      ...over,
+    });
+
+    const mkMember = (qq, over = {}) => ({
+      qq,
+      nick: `群友${qq}`,
+      affinity: 40,
+      stats: { messages: 10, ats: 0, replies: 0, stickersSeen: 0, proactives: 0 },
+      lastSceneId: 'g1',
+      lastSeenAt: T0,
+      lastCallAt: 0,
+      callCount: 0,
+      ...over,
+    });
+
+    const mkEngine = (over = {}, deps = {}) =>
+      new InitiativeEngine({
+        cfg: baseCfg(over),
+        isSceneBusy: deps.isSceneBusy || (() => false),
+        getMembers: deps.getMembers || (() => []),
+        isMuted: deps.isMuted || (() => false),
+      });
+
+    // 1) 默认关闭
+    const off = new InitiativeEngine({ cfg: {} });
+    off.noteActivity('g1', T0);
+    check('发起：默认关闭，tick 不产出动作', off.tick(T0 + 999999) === null);
+    check('发起：默认关闭时三个开关都是 false', !off.enabled && !off.cfg.callout.enabled);
+
+    // 2) 冷场时间不够 → 不动
+    const e1 = mkEngine();
+    [0, 1000, 2000].forEach((d) => e1.noteActivity('g1', T0 + d));
+    check('冷场：只安静了 0.5 秒不动手', e1.tick(T0 + 2500) === null);
+
+    // 3) 达标 → 冷场接话
+    const act1 = e1.tick(T0 + 3000);
+    check('冷场：安静满阈值后接话', act1?.kind === 'chime' && act1.sceneId === 'g1', JSON.stringify(act1));
+    check('冷场：理由里带分钟数', /安静了 0 分钟/.test(act1?.reason || ''), act1?.reason);
+
+    // 4) 同一群冷却内不重复
+    check('冷场：冷却期内不再接话', e1.tick(T0 + 4000) === null);
+
+    // 5) 凉太久也不接
+    const e2 = mkEngine();
+    [0, 1000, 2000].forEach((d) => e2.noteActivity('g1', T0 + d));
+    check('冷场：安静太久（话题凉了）不接', e2.tick(T0 + 2000 + 70000) === null);
+
+    // 6) 冷场前没热闹过 → 不接
+    const e3 = mkEngine();
+    e3.noteActivity('g1', T0);
+    check('冷场：之前只有 1 条消息，不硬接', e3.tick(T0 + 2000) === null);
+
+    // 7) 免打扰时段
+    const quietEngine = mkEngine({ quietHours: { start: 0, end: 24 } });
+    [0, 1000, 2000].forEach((d) => quietEngine.noteActivity('g1', T0 + d));
+    check('闸门：免打扰时段内一律不动', quietEngine.tick(T0 + 3000) === null);
+
+    // 8) 日限
+    const e4 = mkEngine({ dailyLimit: 1 });
+    [0, 1000, 2000].forEach((d) => e4.noteActivity('g1', T0 + d));
+    check('闸门：日限 1 次，第一次放行', e4.tick(T0 + 3000)?.kind === 'chime');
+    [0, 1000, 2000].forEach((d) => e4.noteActivity('g2', T0 + 3000 + d));
+    check('闸门：日限用完后别的群也不动', e4.tick(T0 + 7000) === null);
+
+    // 9) 正在回答中的群不插话
+    const e5 = mkEngine({}, { isSceneBusy: (s) => s === 'g1' });
+    [0, 1000, 2000].forEach((d) => e5.noteActivity('g1', T0 + d));
+    check('闸门：群正在回答中，不插话', e5.tick(T0 + 3000) === null);
+
+    // ---------- 按人点名 ----------
+    const calloutOn = { callout: { enabled: true, minAffinity: 30, minMessages: 5, perUserCooldownMs: 100000, cooldownMs: 5000 }, chime: { ...baseCfg().chime, enabled: false } };
+
+    const a = mkMember('2001', { affinity: 60 });
+    const b = mkMember('2002', { affinity: 45 });
+    const e6 = mkEngine(calloutOn, { getMembers: () => [a, b] });
+    const act6 = e6.tick(T0);
+    check('点名：选出亲密度最高的', act6?.kind === 'callout' && act6.userId === '2001', JSON.stringify(act6));
+    check('点名：带上要去的群', act6?.sceneId === 'g1');
+
+    const mutedA = mkEngine(calloutOn, { getMembers: () => [a, b], isMuted: (q) => q === '2001' });
+    check('点名：面板上静音的人被跳过', mutedA.tick(T0)?.userId === '2002');
+
+    const lowA = mkMember('2003', { affinity: 5 });
+    const lowMsg = mkMember('2004', { affinity: 90, stats: { messages: 1 } });
+    const e7 = mkEngine(calloutOn, { getMembers: () => [lowA, lowMsg] });
+    check('点名：亲密度不够、发言太少的都不选', e7.tick(T0) === null);
+
+    const recently = mkMember('2005', { affinity: 99, lastCallAt: T0 - 1000 });
+    const e8 = mkEngine(calloutOn, { getMembers: () => [recently, b] });
+    check('点名：刚被叫过的人不重复叫', e8.tick(T0)?.userId === '2002');
+
+    const noScene = mkMember('2006', { affinity: 99, lastSceneId: null });
+    const e9 = mkEngine(calloutOn, { getMembers: () => [noScene] });
+    check('点名：不知道在哪个群的人不选（没法 @）', e9.tick(T0) === null);
+
+    // 日限跨天重置
+    const e10 = mkEngine({ dailyLimit: 1 });
+    [0, 1000, 2000].forEach((d) => e10.noteActivity('g1', T0 + d));
+    e10.tick(T0 + 3000);
+    const nextDay = T0 + 36 * 3600 * 1000;
+    [0, 1000, 2000].forEach((d) => e10.noteActivity('g1', nextDay + d));
+    check('闸门：日限按天重置', e10.tick(nextDay + 3000)?.kind === 'chime');
   }
 
   const failed = results.filter((r) => !r.ok);

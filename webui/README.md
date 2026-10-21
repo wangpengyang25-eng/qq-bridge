@@ -78,10 +78,13 @@ node server.mjs --bridge "E:\QQ bot\qq-bridge" --port 5173
 | 文件 | 谁写 | 内容 |
 |---|---|---|
 | `<bridge>/data/members.json` | **只有 bridge** | 计数器、亲密度、时间戳 |
-| `webui/data/overrides.json` | **只有面板** | 备注、静音、手动改的亲密度 |
+| `data/overrides.json`（和 members 同目录） | **只有面板** | 备注、静音、手动改的亲密度 |
 
 面板显示时把 overrides 盖在 members 上面。这样你在界面上写的备注，不会被 bridge 的下一轮计数冲掉；
 bridge 也不会因为你改了亲密度就把自己的计数器搞乱。
+
+bridge 也会**读** overrides（只读其中 `muted` 和 `note`）：在面板上点了"不要主动找这个人"，
+主动点名就会跳过它。
 
 members 里一个成员一条：
 

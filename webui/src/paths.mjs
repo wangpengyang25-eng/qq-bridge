@@ -36,13 +36,13 @@ export function resolveBridgeDir(explicit) {
 
 export function resolvePaths(bridgeDir) {
   const bridge = bridgeDir ? path.resolve(bridgeDir) : resolveBridgeDir();
+  // 两个文件都放 data/ 下，各写各的：
+  //   members.json   bridge 独占写入，面板只读
+  //   overrides.json 面板独占写入，bridge 只读（用来尊重静音）
+  const dataDir = bridge ? path.join(bridge, 'data') : path.join(WEBUI_DIR, 'data');
   return {
     bridgeDir: bridge,
-    // bridge 独占写入的东西
-    membersFile: bridge
-      ? path.join(bridge, 'data', 'members.json')
-      : path.join(WEBUI_DIR, 'data', 'members.json'),
-    // 面板独占写入的东西（人工编辑）
-    overridesFile: path.join(WEBUI_DIR, 'data', 'overrides.json'),
+    membersFile: path.join(dataDir, 'members.json'),
+    overridesFile: path.join(dataDir, 'overrides.json'),
   };
 }

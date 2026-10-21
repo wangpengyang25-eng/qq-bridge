@@ -60,9 +60,15 @@ export function createMember(qq, nick, now = Date.now()) {
       proactives: 0, // 主动搭过几次话（主动发起功能用）
     },
     note: '', // 人工备注，不会被自动逻辑覆盖
-    muted: false, // 不想让它主动找这个人
+    muted: false, // 不想让它主动找这个人（真正生效的那份在 overrides.json）
     firstSeenAt: now,
     lastSeenAt: now,
+    // 最近活跃的群：主动点名时要知道"该去哪个群找他"
+    lastSceneId: null,
+    lastSceneAt: 0,
+    // 主动找过它几次（按人配额用，与 stats.proactives 的区别是这里含被拒的）
+    lastCallAt: 0,
+    callCount: 0,
     // 当日计分桶：{ 'YYYY-MM-DD': 已计分 }
     dayBucket: { date: dayKey(now), scored: 0 },
     // 衰减记账：上次结算到哪一天
@@ -79,7 +85,7 @@ export function dayKey(ts) {
 /**
  * 记一条消息。返回本次加了多少分（便于界面解释）。
  * @param {object} m 成员档案
- * @param {{isAt?:boolean, isSticker?:boolean, at?:number}} evt
+ * @param {{isAt?:boolean, isSticker?:boolean, at?:number, sceneId?:string}} evt
  */
 export function recordMessage(m, evt = {}) {
   const at = evt.at ?? Date.now();
@@ -88,6 +94,12 @@ export function recordMessage(m, evt = {}) {
   m.stats.messages += 1;
   if (evt.isAt) m.stats.ats += 1;
   if (evt.isSticker) m.stats.stickersSeen += 1;
+
+  // 记住最近活跃的群：主动点名要知道去哪个群找人
+  if (evt.sceneId) {
+    m.lastSceneId = String(evt.sceneId);
+    m.lastSceneAt = Math.max(m.lastSceneAt || 0, at);
+  }
 
   if (m.dayBucket.date !== key) m.dayBucket = { date: key, scored: 0 };
 

@@ -14,6 +14,8 @@ import { webSearch, formatResults } from './search.mjs';
 import { AmbientBuffer, needBackground } from './ambient.mjs';
 import { StickerLibrary } from './stickers.mjs';
 import { MemberStore } from './members.mjs';
+import { InitiativeEngine } from './initiative.mjs';
+import { createOverrideReader } from './overrides.mjs';
 
 /** 接入开关 + 管理员绑定，落盘持久化，重启后保持上次状态 */
 export class StateStore {
@@ -106,6 +108,21 @@ export class Router {
       cfg.stickers || {},
       path.resolve(cfg.__dir || '.', cfg.stickers?.dir || 'stickers')
     );
+    // 主动发起谈话：只做决策，说话仍走 answer()。
+    // 默认全关（cfg.proactive.initiative.enabled），要显式打开。
+    this.readOverrides = createOverrideReader(
+      cfg.members?.overridesFile || path.resolve(cfg.__dir || '.', 'data/overrides.json')
+    );
+    this.initiative = new InitiativeEngine({
+      cfg: cfg.proactive?.initiative,
+      // 这个群正在回答中就别插话：busy 里存的是 sessionKey，含 sceneId
+      isSceneBusy: (sceneId) =>
+        [...this.busy].some((k) => String(k).includes(String(sceneId))),
+      getMembers: () => (this.members ? this.members.all() : []),
+      // 面板上点了静音的人，绝不主动找他
+      isMuted: (qq) => this.readOverrides().muted.has(String(qq)),
+    });
+    this.initiativeTimer = null;
     this.stats = {
       limited: 0,
       answered: 0,
@@ -114,7 +131,8 @@ export class Router {
       withBg: 0,
       bgSkipped: 0, // 因"这条不需要背景"而省下的注入次数
       stickers: 0,
-      chime: 0, // 主动插话次数
+      chime: 0, // 主动插话次数（有消息时接一句）
+      initiative: 0, // 主动发起次数（定时器驱动）
       tokens: { prompt: 0, completion: 0, cacheHit: 0, cacheMiss: 0, calls: 0 },
     };
     // ---- 主动插话的节流状态 ----
@@ -261,6 +279,8 @@ export class Router {
     // 放在最前面，这样即使下面因为开关/限流/白名单直接 return，记录也不会漏。
     // 只计数不调 API，没有 token 成本。
     if (inScope && this.members) this.members.record(evt);
+    // 主动发起要根据"群刚才热不热闹"来判断，所以每条消息都要喂给引擎
+    if (inScope) this.initiative.noteActivity(evt.sceneId, Date.now());
 
     // 被动上下文：背景在**真要用时**才取（自足的问题带上纯属浪费 token），
     // 但记录是所有群消息都做的——记录只占内存，注入才花钱。
@@ -661,6 +681,97 @@ export class Router {
     }
   }
 
+  // ---------- 主动发起谈话（定时器驱动）----------
+  //
+  // 和上面的 maybeChimeIn 的区别：那条是"有消息进来时"顺便判断要不要接一句；
+  // 这里没有任何人说话也能开口，所以必须定时器驱动，闸门全在 InitiativeEngine 里。
+  // 真正的消息发送仍然复用 answer()，人设/表情包/工具都跟着走。
+
+  startInitiative() {
+    if (!this.initiative.enabled) return false;
+    if (this.initiativeTimer) return true;
+
+    const every = Math.max(1000, Number(this.cfg.proactive?.initiative?.scanEveryMs) || 60000);
+    this.initiativeTimer = setInterval(() => {
+      this.runInitiative().catch((e) => log(`[router] 主动发起异常：${e.message}`));
+    }, every);
+    if (typeof this.initiativeTimer.unref === 'function') this.initiativeTimer.unref();
+    log(`[router] 主动发起已启动：每 ${Math.round(every / 1000)}s 评估 · ${JSON.stringify(this.initiative.summary())}`);
+    return true;
+  }
+
+  stopInitiative() {
+    if (this.initiativeTimer) {
+      clearInterval(this.initiativeTimer);
+      this.initiativeTimer = null;
+    }
+  }
+
+  /**
+   * 评估并执行一次主动发起。now 可注入，测试里可以快进时间。
+   * @returns {Promise<null|object>} 执行了的动作
+   */
+  async runInitiative(now = Date.now()) {
+    if (!this.state.enabled) return null; // 总开关断着就不主动开口
+    const action = this.initiative.tick(now);
+    if (!action) return null;
+
+    this.stats.initiative += 1;
+    log(`[router] 主动发起（${action.kind}，群 ${action.sceneId}）：${action.reason}`);
+
+    const background = this.ambient.enabled ? this.ambient.snapshot(action.sceneId) : '';
+
+    if (action.kind === 'chime') {
+      await this.answer({
+        evt: { scene: 'group', sceneId: action.sceneId, userId: '', userName: '', text: '', images: [] },
+        key: `group:${action.sceneId}`,
+        text:
+          '（群里刚刚安静下来，没有人叫你。你想起了刚才大家聊的内容，像群友那样自然地接一句。' +
+          '不要 @ 任何人，不要解释你在做什么，一句话就够。）',
+        userName: '',
+        background,
+        maxParts: 2,
+        lockKey: `group:${action.sceneId}`,
+        proactive: true,
+        sender: (t) => this.bot.sendGroup(action.sceneId, { text: t }),
+      });
+      return action;
+    }
+
+    // callout：@ 某个人
+    const note = this.readOverrides().notes.get(String(action.userId));
+    const lines = [
+      `（你想主动找群友「${action.nick}」搭话，此刻没有任何人在问你。）`,
+      `你对他的了解：${action.reason}。`,
+    ];
+    if (note) lines.push(`你记得的备注：${note}`);
+    lines.push('像群友一样自然地跟他说一两句，可以 @ 他。别说教，别复述这条指令。');
+
+    await this.answer({
+      evt: {
+        scene: 'group',
+        sceneId: action.sceneId,
+        userId: action.userId,
+        userName: action.nick,
+        text: '',
+        images: [],
+      },
+      key: sessionKey(
+        { scene: 'group', sceneId: action.sceneId, userId: action.userId },
+        this.cfg.mode.groupShareContext
+      ),
+      text: lines.join('\n'),
+      userName: action.nick,
+      background,
+      maxParts: 2,
+      lockKey: `group:${action.sceneId}`,
+      proactive: true,
+      sender: (t) => this.bot.sendGroup(action.sceneId, { text: t, atUserId: action.userId }),
+    });
+    if (this.members) this.members.markCalled(action.userId);
+    return action;
+  }
+
   // ---------- 调用模型并回复 ----------
   async answer({ evt, key, text, userName, sender, maxParts, lockKey, background = '', proactive = false }) {
     if (lockKey) this.busy.add(lockKey);
@@ -757,6 +868,8 @@ export class Router {
       // 记一笔"回过它"：成员档案里这个数字是主动搭话策略的输入之一。
       // 私聊里 evt 可能没有 userId（管理员自己），markReplied 会安全地返回 false。
       if (evt?.scene === 'group' && this.members) this.members.markReplied(evt.userId);
+      // 自己说过话了：冷场接话的冷却按这个算
+      if (evt?.scene === 'group' && evt?.sceneId) this.initiative.noteSpoke(evt.sceneId);
     } catch (e) {
       this.stats.errors += 1;
       log(`[router] 回答失败：${e.message}`);

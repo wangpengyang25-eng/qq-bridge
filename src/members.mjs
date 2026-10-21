@@ -148,6 +148,7 @@ export class MemberStore {
         isAt: !!evt.isAtMe,
         isSticker: !!evt.hasSticker,
         at: evt.at || Date.now(),
+        sceneId: evt.sceneId,
       });
 
       this.dirty = true;
@@ -165,6 +166,23 @@ export class MemberStore {
     const m = this.byQq.get(String(userId || ''));
     if (!m) return false;
     recordReply(m);
+    this.dirty = true;
+    this.scheduleFlush();
+    return true;
+  }
+
+  /** 全部成员（给主动发起的决策层用） */
+  all() {
+    return this.doc.members;
+  }
+
+  /** 记一次"主动找了它"：按人配额与面板展示都看这个 */
+  markCalled(userId) {
+    const m = this.byQq.get(String(userId || ''));
+    if (!m) return false;
+    m.lastCallAt = Date.now();
+    m.callCount = (m.callCount || 0) + 1;
+    m.stats.proactives = (m.stats.proactives || 0) + 1;
     this.dirty = true;
     this.scheduleFlush();
     return true;
